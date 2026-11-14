@@ -1,0 +1,13 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	reverse_proxy new-api:3000 {
+		flush_interval -1
+	}
+	header X-Content-Type-Options nosniff
+	header Referrer-Policy no-referrer
+	header Link "<https://github.com/philipxyc/new-api>; rel=\"source\""
+}

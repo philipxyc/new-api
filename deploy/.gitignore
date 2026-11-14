@@ -1,0 +1,6 @@
+secrets/
+backups/
+*.env
+*.key
+*.tar
+*.dump

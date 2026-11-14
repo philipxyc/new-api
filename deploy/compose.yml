@@ -1,0 +1,132 @@
+name: new-api-production
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  proxy:
+    image: caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    restart: unless-stopped
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:80:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks: [frontend]
+    read_only: true
+    tmpfs: [/config, /data]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    logging: *logging
+    depends_on:
+      new-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  new-api:
+    image: ${NEW_API_IMAGE:?Set an immutable image digest}
+    restart: unless-stopped
+    env_file:
+      - path: ./secrets/new-api.env
+        required: false
+    environment:
+      PORT: "3000"
+      TZ: UTC
+      DEFAULT_LANGUAGE: en
+      NODE_NAME: production
+      GOMEMLIMIT: 512MiB
+      PLUGIN_MEMORY_LIMIT_MB: "64"
+      TRUSTED_PROXIES: 172.30.80.0/28
+      # Initial HTTP deployment, explicitly requested by the operator.
+      SESSION_COOKIE_SECURE: "false"
+      ERROR_LOG_ENABLED: "true"
+      BATCH_UPDATE_ENABLED: "true"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - app_data:/data
+    networks: [frontend, backend, egress]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    logging: *logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/status | grep -Eq '\"success\"[[:space:]]*:[[:space:]]*true'"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+
+  postgres:
+    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: newapi
+      POSTGRES_DB: newapi
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    secrets: [postgres_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [backend]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    shm_size: 64m
+    logging: *logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U newapi -d newapi"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+    restart: unless-stopped
+    command: ["redis-server", "/run/secrets/redis_config"]
+    secrets: [redis_config, redis_password]
+    volumes:
+      - redis_data:/data
+    networks: [backend]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 96m
+    logging: *logging
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(cat /run/secrets/redis_password) redis-cli ping | grep -qx PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  frontend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.80.0/28
+  backend:
+    internal: true
+  egress: {}
+
+volumes:
+  app_data:
+  postgres_data:
+  redis_data:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  redis_password:
+    file: ./secrets/redis_password
+  redis_config:
+    file: ./secrets/redis.conf

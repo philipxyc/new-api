@@ -161,9 +161,8 @@ func TestBuiltInTaskPluginResponsesAndUsageContracts(t *testing.T) {
 			actualKeys = append(actualKeys, entry.Name())
 		}
 	}
-	// Every other directory holds a request processing plugin, which has no
-	// task part.
-	allKeys := slices.Concat(expectedKeys, slices.Collect(maps.Keys(requestPluginHooks)))
+	// Provider-only and request processing plugins have no task part.
+	allKeys := slices.Concat(expectedKeys, []string{"github-copilot"}, slices.Collect(maps.Keys(requestPluginHooks)))
 	slices.Sort(allKeys)
 	assert.Equal(t, allKeys, actualKeys)
 
