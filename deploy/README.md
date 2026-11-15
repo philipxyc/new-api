@@ -84,12 +84,48 @@ or `https://api.enterprise.githubcopilot.com`). Credentials never go to an
 arbitrary Base URL or a redirected credential exchange. Expiring inference
 tokens are renewed using the server-side GitHub authorization.
 
-Fetch the accessible models after sign-in. Only Chat Completions-capable
-models are listed: Responses and Anthropic requests use the host's existing
-Chat Completions converters, not Copilot's native Responses-only models.
-Streaming and tool calls use the existing relay and usage accounting; configure
-administrator pricing and client quotas explicitly. New API quotas are not a
-promise of available GitHub subscription capacity.
+Fetch the accessible models after sign-in. Discovery excludes embeddings and
+decision models. Verified Responses-only model IDs use native `/responses`;
+Chat Completions and Messages clients use the host's existing Responses
+converters for those IDs. Other chat models retain their Chat Completions
+routes. No extra proxy, authentication state machine or billing engine is used.
+The endpoint bindings are an explicit catalog snapshot, not family-name guesses.
+Streaming, tools and usage settlement remain the existing relay's responsibility.
+
+Use client aliases such as `github-copilot/gpt-6.1-terra` with channel
+`model_mapping` set to `{"github-copilot/gpt-6.1-terra":"gpt-6.1-terra"}`.
+The prefix isolates GitHub pricing from identically named direct-provider
+models. Alias-to-upstream mappings must be configured before enabling aliases.
+Built-in expressions record the official pricing source and verification date
+in `setting/billing_setting/builtin_billing.go`; input, output, cache reads,
+cache writes and applicable whole-context thresholds are priced there.
+Administrator overrides and group multipliers still apply. Use a multiplier
+of 1 for published-rate deductions. These are estimated usage charges, not
+reconciliation of GitHub subscription allowances or invoices.
+
+Unpublished rates (including MAI-Code-2 and Sol fast) and time-limited Gemini
+promotions are deliberately not inferred from other providers' prices.
+Keep those models disabled until an explicit, reviewed price is configured.
+Discovery is not automatic enablement, nor proof that inference is permitted.
+In particular, GitHub can issue a credential and list models while rejecting
+inference with `billing_not_configured`. If the account has several Copilot
+licenses, choose the intended **Usage billed to** entity at
+`https://github.com/settings/copilot/features`; do not repeat Device Flow.
+Entity names can themselves contain words such as “feature flag” or “Open Source.”
+New API quotas do not guarantee GitHub subscription capacity.
+
+### Same-day model updates
+
+Refresh the authenticated account catalog, not just a public model list. Check
+the new ID's endpoint capabilities and GitHub's published rates. Existing chat
+protocols need only a reviewed alias, mapping and price; new Responses-only IDs
+also need an explicit plugin route binding. Changed protocols require a plugin
+change, not a guessed route. Keep unpriced or unverified models disabled.
+Run a bounded inference, stream/tool probe and usage/quota reconciliation before
+enabling a model for clients. Ship source changes through the normal checks,
+immutable image build and digest deployment. Preserve explicit admin overrides
+and recheck promotional expiry dates. LiteLLM is a useful compatibility
+reference, not the authority for Copilot prices or a same-day rollout guarantee.
 
 Provision a root-only `/opt/new-api/secrets/smoke.curl` after creating a limited
 New API client token and choosing an accessible model. Use curl's config format:
@@ -98,6 +134,10 @@ an authorization header, `Content-Type: application/json`, and a JSON `data`
 value containing the selected model and a minimal user message. Never put the
 real token in a shell argument, Git, an image, or workflow output.
 The deploy script requires a successful authenticated inference response.
+For probes through Docker's host-published loopback port, the application's
+observed source IP may be the private Docker gateway, not `127.0.0.1`.
+Restrict the smoke token to the verified source address plus its specific
+model and finite quota; do not remove its IP restriction to make a probe pass.
 Run the workflow again after provisioning; previously built digests may also be
 redeployed manually without rebuilding.
 

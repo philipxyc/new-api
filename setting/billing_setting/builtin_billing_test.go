@@ -18,6 +18,86 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGitHubCopilotBuiltinBilling(t *testing.T) {
+	settings := config.GlobalConfig.Get("billing_setting").(*billing_setting.BillingSetting)
+	saved := *settings
+	savedRatios, savedPrices := ratio_setting.ModelRatio2JSONString(), ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		*settings = saved
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatios))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+	})
+	*settings = billing_setting.BillingSetting{BillingMode: map[string]string{}, BillingExpr: map[string]string{}}
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"gpt-6.1-terra":7}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
+
+	for _, tc := range []struct {
+		name  string
+		usage dto.Usage
+		quota int
+	}{
+		{"claude-haiku-4.5", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 750},
+		{"claude-sonnet-5", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1500},
+		{"claude-haiku-5.5", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 75},
+		{"claude-sonnet-5.5", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1500},
+		{"claude-opus-5.5", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 3000},
+		{"gpt-5.3-codex", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1575},
+		{"gpt-5.4-nano", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 163},
+		{"gpt-5.6-luna", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 160},
+		{"gpt-5.6-sol", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 3000},
+		{"gpt-5.6-terra", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1600},
+		{"gpt-6.1-terra", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 750},
+		{"gpt-6.1-sol", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1500},
+		{"gpt-6-astra", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 7500},
+		{"gpt-6-luna", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 75},
+		{"gpt-6-sol", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1500},
+		{"grok-4.6", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1300},
+		{"grok-4.7", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1300},
+		{"mai-code-1.1-flash", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 160},
+		{"gemini-4-hydrogen", dto.Usage{PromptTokens: 1000, CompletionTokens: 100}, 1125},
+		{"claude-haiku-5.5", dto.Usage{PromptTokens: 100000, CompletionTokens: 1000}, 5250},
+		{"claude-haiku-5.5", dto.Usage{PromptTokens: 100001, CompletionTokens: 1000}, 26250},
+		{"grok-4.7", dto.Usage{PromptTokens: 200000, CompletionTokens: 1000}, 203000},
+		{"grok-4.7", dto.Usage{PromptTokens: 200001, CompletionTokens: 1000}, 406002},
+		{"gpt-6.1-terra", dto.Usage{PromptTokens: 272000, CompletionTokens: 1000,
+			PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 200000, CacheWriteTokens: 20000}}, 46000},
+		{"gpt-6.1-terra", dto.Usage{PromptTokens: 272001, CompletionTokens: 1000,
+			PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 200000, CacheWriteTokens: 20000}}, 90751},
+		{"gpt-5.6-luna", dto.Usage{PromptTokens: 200000, CompletionTokens: 1000,
+			PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 150000, CacheWriteTokens: 10000}}, 7350},
+		{"gpt-5.6-luna", dto.Usage{PromptTokens: 200001, CompletionTokens: 1000,
+			PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 150000, CacheWriteTokens: 10000}}, 14400},
+		{"gpt-6.1-terra", dto.Usage{PromptTokens: 12000, PromptTokensDetails: dto.InputTokenDetails{
+			CachedTokens: 4000, CacheWriteTokens: 7000,
+			CacheWriteTokensDetails: &dto.CacheWriteTokenDetails{TTL30mTokens: 3000, TTL12hTokens: 4000}}}, 4975},
+		{"claude-sonnet-5", dto.Usage{PromptTokens: 1000, CompletionTokens: 100, UsageSemantic: "anthropic",
+			ClaudeCacheCreation5mTokens: 100, ClaudeCacheCreation1hTokens: 200,
+			PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 2000, CachedCreationTokens: 300}}, 2075},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "github-copilot/" + tc.name
+			expression, ok := billing_setting.GetBillingExpr(name)
+			require.True(t, ok)
+			params := service.BuildTieredTokenParams(&tc.usage, tc.usage.UsageSemantic == "anthropic", billingexpr.UsedVars(expression))
+			result, err := billingexpr.ComputeTieredQuota(&billingexpr.BillingSnapshot{
+				ExprString: expression, ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 1, QuotaPerUnit: 500000,
+			}, params)
+			require.NoError(t, err)
+			assert.Equal(t, tc.quota, result.ActualQuotaAfterGroup)
+		})
+	}
+	assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode("gpt-6.1-terra"), "direct-provider pricing is unchanged")
+	settings.BillingMode["github-copilot/gpt-6.1-terra"] = billing_setting.BillingModeTieredExpr
+	settings.BillingExpr["github-copilot/gpt-6.1-terra"] = `tier("custom", p * 7)`
+	expression, ok := billing_setting.GetBillingExpr("github-copilot/gpt-6.1-terra")
+	require.True(t, ok)
+	result, err := billingexpr.ComputeTieredQuota(&billingexpr.BillingSnapshot{
+		ExprString: expression, ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 2, QuotaPerUnit: 500000,
+	}, billingexpr.TokenParams{P: 1000, Len: 1000})
+	require.NoError(t, err)
+	assert.Equal(t, 7000, result.ActualQuotaAfterGroup, "administrator overrides and group multipliers remain effective")
+}
+
 func TestGPT6AstraBuiltinBilling(t *testing.T) {
 	settings := config.GlobalConfig.Get("billing_setting").(*billing_setting.BillingSetting)
 	saved := *settings

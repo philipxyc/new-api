@@ -5,13 +5,32 @@ const GITHUB_API = "https://api.github.com";
 const CLIENT_ID = "Iv1.b507a08c87ecfe98";
 const USER_AGENT = "NewAPI-Copilot/1.0";
 const API_ORIGINS = ["https://api.githubcopilot.com", "https://api.business.githubcopilot.com", "https://api.enterprise.githubcopilot.com"];
+// Responses-only IDs verified against the authenticated Copilot catalog.
+// Keep explicit bindings: a new model must not inherit a guessed protocol.
+const RESPONSES_MODELS = [
+  "gpt-5.3-codex",
+  "gpt-5.4-nano",
+  "gpt-5.6-luna",
+  "gpt-5.6-sol-fast",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-6.1-sol",
+  "gpt-6.1-terra",
+  "gpt-6-astra",
+  "gpt-6-luna",
+  "gpt-6-sol",
+  "grok-4.6",
+  "grok-4.7",
+  "mai-code-1.1-flash",
+];
+const RESPONSES_ALIASES = RESPONSES_MODELS.flatMap((model) => [model, "github-copilot/" + model]);
 
 export const meta = {
   apiVersion: 1,
   key: "github-copilot",
   name: "GitHub Copilot",
   icon: "GithubCopilot",
-  version: "1.0.0",
+  version: "1.1.0",
   author: { name: "QuantumNous" },
   description: {
     en: "GitHub Copilot chat with upstream device authorization",
@@ -24,7 +43,20 @@ export const meta = {
     zh: "留空密钥保存渠道，然后在渠道中登录 GitHub",
   },
   relay: [
+    {
+      incoming_path: "/v1/chat/completions",
+      upstream_path: "/responses",
+      models: RESPONSES_ALIASES,
+      converter: "openai_chat_completions_to_openai_responses",
+    },
     { incoming_path: "/v1/chat/completions", upstream_path: "/chat/completions" },
+    { incoming_path: "/v1/responses", upstream_path: "/responses", models: RESPONSES_ALIASES },
+    {
+      incoming_path: "/v1/messages",
+      upstream_path: "/responses",
+      models: RESPONSES_ALIASES,
+      converter: "claude_messages_to_openai_responses",
+    },
     {
       incoming_path: "/v1/responses",
       upstream_path: "/chat/completions",
@@ -84,8 +116,9 @@ function credentialResult(ctx, github, account) {
     throw new Error("Copilot token exchange returned an invalid token or expiry");
   }
   const origin = apiOrigin(ctx.baseUrl);
-  if (!issued.endpoints || apiOrigin(issued.endpoints.api) !== origin) {
-    throw new Error("Set the channel Base URL to the API origin assigned to this Copilot subscription");
+  const assignedOrigin = apiOrigin(issued.endpoints && issued.endpoints.api);
+  if (assignedOrigin !== origin) {
+    throw new Error("Set the channel Base URL to " + assignedOrigin + ", then retry this sign-in without restarting GitHub authorization");
   }
   let expiresAt = issued.expires_at;
   if (seconds(issued.refresh_in, 86400)) expiresAt = Math.min(expiresAt, now + issued.refresh_in);
@@ -214,6 +247,7 @@ export function signRequest(ctx, request) {
       "User-Agent": USER_AGENT,
       "Copilot-Integration-Id": "vscode-chat",
       "Openai-Intent": "conversation-panel",
+      "X-GitHub-Api-Version": "2025-04-01",
       "X-Initiator": "user",
       "X-Request-Id": utils.uuid(),
     },
@@ -221,10 +255,13 @@ export function signRequest(ctx, request) {
 }
 
 export function prepareRequest(_ctx, request) {
-  const messages = request.body && request.body.messages;
+  const messages = request.body && (request.body.messages || request.body.input);
   if (
     Array.isArray(messages) &&
-    messages.some((message) => message && Array.isArray(message.content) && message.content.some((part) => part && part.type === "image_url"))
+    messages.some(
+      (message) =>
+        message && Array.isArray(message.content) && message.content.some((part) => part && (part.type === "image_url" || part.type === "input_image"))
+    )
   ) {
     return { effects: [{ type: "header.patch", set: { "Copilot-Vision-Request": "true" } }] };
   }
@@ -245,7 +282,10 @@ export function convertResponse(_ctx, response) {
             model &&
             typeof model.id === "string" &&
             model.id.length > 0 &&
-            (!Array.isArray(model.supported_endpoints) || model.supported_endpoints.includes("/chat/completions"))
+            (!model.capabilities || !model.capabilities.type || model.capabilities.type === "chat") &&
+            (!Array.isArray(model.supported_endpoints) ||
+              model.supported_endpoints.includes("/chat/completions") ||
+              (RESPONSES_MODELS.includes(model.id) && model.supported_endpoints.includes("/responses")))
         )
         .map((model) => ({ id: model.id, object: "model", owned_by: "github-copilot" })),
     },

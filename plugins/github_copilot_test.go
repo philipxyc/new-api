@@ -184,6 +184,10 @@ func TestGitHubCopilotRevocationAndTokenEndpointValidation(t *testing.T) {
 			} else {
 				require.Error(t, err)
 				assert.NotContains(t, err.Error(), "private-")
+				if tc.name == "wrong subscription origin" {
+					assert.Contains(t, err.Error(), "https://api.business.githubcopilot.com")
+					assert.Contains(t, err.Error(), "without restarting")
+				}
 			}
 		})
 	}
@@ -193,7 +197,15 @@ func TestGitHubCopilotModelDiscovery(t *testing.T) {
 	plugin, ok := jsplugin.DefaultRegistry.Generation().Get("github-copilot")
 	require.True(t, ok)
 	result, upstreamErr, err := plugin.CallConvertResponse(t.Context(), jsplugin.HookContext{Path: "/v1/models"}, http.StatusOK, nil,
-		[]byte(`{"data":[{"id":"chat","supported_endpoints":["/chat/completions"]},{"id":"responses-only","supported_endpoints":["/responses"]},{"id":"legacy"},{"id":""}]}`))
+		[]byte(`{"data":[
+			{"id":"chat","supported_endpoints":["/chat/completions"]},
+			{"id":"gpt-6.1-terra","capabilities":{"type":"chat"},"supported_endpoints":["/responses"]},
+			{"id":"unverified-responses-model","supported_endpoints":["/responses"]},
+			{"id":"legacy","capabilities":{"type":"chat"}},
+			{"id":"text-embedding-3-small","capabilities":{"type":"embeddings"}},
+			{"id":"decision","capabilities":{"type":"decisions"},"supported_endpoints":["/chat/completions"]},
+			{"id":"disabled","supported_endpoints":[]},{"id":""}
+		]}`))
 	require.NoError(t, err)
 	require.Nil(t, upstreamErr)
 	var catalog struct {
@@ -202,9 +214,41 @@ func TestGitHubCopilotModelDiscovery(t *testing.T) {
 		} `json:"data"`
 	}
 	require.NoError(t, common.Unmarshal(result.Body, &catalog))
-	require.Len(t, catalog.Data, 2)
-	assert.Equal(t, "chat", catalog.Data[0].ID)
-	assert.Equal(t, "legacy", catalog.Data[1].ID)
+	var ids []string
+	for _, entry := range catalog.Data {
+		ids = append(ids, entry.ID)
+	}
+	assert.Equal(t, []string{"chat", "gpt-6.1-terra", "legacy"}, ids)
+}
+
+func TestGitHubCopilotResponsesModelRouting(t *testing.T) {
+	plugin, ok := jsplugin.DefaultRegistry.Generation().Get("github-copilot")
+	require.True(t, ok)
+	for _, tc := range []struct {
+		path, converter, fallback string
+	}{
+		{"/v1/chat/completions", "openai_chat_completions_to_openai_responses", ""},
+		{"/v1/responses", "", "openai_responses_to_openai_chat_completions"},
+		{"/v1/messages", "claude_messages_to_openai_responses", "anthropic_messages_to_openai_chat_completions"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			for _, name := range []string{"gpt-5.3-codex", "gpt-5.4-nano", "gpt-5.6-luna", "gpt-5.6-sol-fast", "gpt-5.6-sol",
+				"gpt-5.6-terra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "grok-4.6", "grok-4.7", "mai-code-1.1-flash"} {
+				for _, prefix := range []string{"", "github-copilot/"} {
+					route, found := plugin.Meta.RelayRoute(tc.path, prefix+name)
+					require.True(t, found)
+					assert.Equal(t, "/responses", route.UpstreamPath, prefix+name)
+					assert.EqualValues(t, tc.converter, route.Converter, prefix+name)
+				}
+			}
+			for _, name := range []string{"gpt-4.1", "claude-sonnet-5", "github-copilot/claude-haiku-4.5"} {
+				route, found := plugin.Meta.RelayRoute(tc.path, name)
+				require.True(t, found)
+				assert.Equal(t, "/chat/completions", route.UpstreamPath, name)
+				assert.EqualValues(t, tc.fallback, route.Converter, name)
+			}
+		})
+	}
 }
 
 func TestGitHubCopilotExpiringAuthorization(t *testing.T) {
@@ -254,9 +298,12 @@ func TestGitHubCopilotExpiringAuthorization(t *testing.T) {
 func TestGitHubCopilotVisionHeaders(t *testing.T) {
 	plugin, ok := jsplugin.DefaultRegistry.Generation().Get("github-copilot")
 	require.True(t, ok)
-	prepared, err := plugin.CallPrepareRequest(t.Context(), jsplugin.HookContext{}, jsplugin.PrepareInput{
-		Body: []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]}`),
-	})
-	require.NoError(t, err)
-	assert.JSONEq(t, `[{"type":"header.patch","set":{"Copilot-Vision-Request":"true"}}]`, string(prepared.Effects))
+	for _, body := range []string{
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]}`,
+		`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/image.png"}]}]}`,
+	} {
+		prepared, err := plugin.CallPrepareRequest(t.Context(), jsplugin.HookContext{}, jsplugin.PrepareInput{Body: []byte(body)})
+		require.NoError(t, err)
+		assert.JSONEq(t, `[{"type":"header.patch","set":{"Copilot-Vision-Request":"true"}}]`, string(prepared.Effects))
+	}
 }

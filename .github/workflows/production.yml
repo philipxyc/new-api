@@ -5,6 +5,7 @@ on:
     paths:
       - deploy/**
       - plugins/**
+      - setting/billing_setting/**
       - .github/workflows/production.yml
   push:
     branches: [main]
@@ -30,7 +31,7 @@ jobs:
         env:
           GOWORK: "off"
           CGO_ENABLED: "0"
-        run: go test ./plugins ./service -run 'TestGitHubCopilot|TestBuiltInTaskPluginResponsesAndUsageContracts|TestPluginLogin' -count=1
+        run: go test ./plugins ./service ./setting/billing_setting -run 'TestGitHubCopilot|TestBuiltInTaskPluginResponsesAndUsageContracts|TestPluginLogin' -count=1
       - name: Deployment configuration checks
         env:
           NEW_API_IMAGE: ghcr.io/philipxyc/new-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
