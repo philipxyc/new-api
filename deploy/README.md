@@ -46,7 +46,14 @@ network.
 7. The first deployment brings the site up but deliberately reports
    **unverified** (exit 3) until setup, Device Flow, and the authenticated smoke
    request are configured. Its digest is retained in `active.env`; `release.env`
-   records only a release that passed authenticated inference. Ingress initially
+   records only a release that passed authenticated inference. An operator who
+   explicitly defers Device Flow can create the root-owned file
+   `/opt/new-api/allow-pending-authorization`. Until the first fully verified
+   release, this permits deployment with health and unauthorized-access checks,
+   an explicit Actions warning, and `verification.status` set to
+   `pending_copilot_authorization`. This never claims authenticated inference
+   passed, and the allowance is removed after the first successful probe.
+   Ingress initially
    binds loopback to prevent an anonymous first-setup takeover. Complete setup
    over administrator SSH, then explicitly set `HTTP_BIND=0.0.0.0` in
    `/opt/new-api/.env` and recreate the proxy to publish port 80.
@@ -56,6 +63,8 @@ only; PostgreSQL and Redis have no published ports and an internal network.
 Copilot credentials are stored by the existing provider-credential lifecycle
 in PostgreSQL and persist when containers are replaced. Redis is not their
 source of truth. Named volumes must not be deleted with `down -v`.
+Set a public site announcement linking to this fork's corresponding source,
+while retaining the upstream New API and QuantumNous links and attribution.
 
 ## Native Copilot channel
 
@@ -121,8 +130,10 @@ database. Rehearse this procedure on a separate Compose project and verify
 schema, channel credentials, users, quotas and application objects.
 
 For an image-only rollback after confirming no incompatible migration ran:
-load `previous.env` into the administrator shell, then run
-`docker compose -f /opt/new-api/compose.yml up -d --wait` from `/opt/new-api`.
+copy `previous.env` to `active.env` and `previous-schema.sha256` to `schema.sha256`
+after preserving the current manifests. From `/opt/new-api`, export the previous
+image with `set -a; source active.env; set +a`, then run
+`docker compose -f compose.yml up -d --wait`.
 Re-run health and authenticated inference checks before marking it successful.
 Do not automatically roll back a failed image after it might have migrated the
 database; an image rollback cannot undo a database migration.
@@ -130,7 +141,8 @@ database; an image rollback cannot undo a database migration.
 ## Security verification references
 
 Apply OWASP ASVS 5.0.0 and the Authentication, Session Management and OAuth2
-Cheat Sheets. The existing provider login flow supplies administrator step-up,
+Cheat Sheets. The existing provider login flow requires an authenticated
+administrator session and provides
 session binding, single-use completion, expiry, server-side device state and
 poll throttling. Provider regression tests cover device pending/slow-down,
 authorization failure, expiry, token renewal, entitlement failure, model

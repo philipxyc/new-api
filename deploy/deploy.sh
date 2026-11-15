@@ -49,14 +49,24 @@ docker compose -f compose.yml up -d --wait --wait-timeout 240
 # Do not automatically roll back an image after it may have migrated the DB.
 curl --fail --silent --max-time 10 http://127.0.0.1/api/status |
   python3 -c 'import json,sys; assert json.load(sys.stdin)["success"] is True'
+[[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 http://127.0.0.1/v1/models)" == 401 ]] || {
+  echo "Unauthenticated model requests must be rejected" >&2
+  exit 1
+}
 if [[ -f secrets/smoke.curl ]]; then
   curl --fail --silent --max-time 120 --config secrets/smoke.curl |
     python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("choices") and r["choices"][0].get("message")'
 else
+  if [[ -f allow-pending-authorization && ! -f release.env ]]; then
+    printf 'pending_copilot_authorization\n' > verification.status
+    echo "::warning::Site deployed and health/unauthorized-access checks passed. Copilot authorization and authenticated inference are explicitly deferred."
+    exit 0
+  fi
   echo "Authenticated inference check not configured; deployment cannot be marked verified." >&2
   # Initial setup must finish before the inference probe can be provisioned.
   exit 3
 fi
 printf 'NEW_API_IMAGE=%s\n' "$image" > release.env
-rm -f approved-migration
+printf 'authenticated_inference_passed\n' > verification.status
+rm -f approved-migration allow-pending-authorization
 echo "Deployment and authenticated inference verified: $image"

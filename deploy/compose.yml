@@ -110,7 +110,6 @@ services:
 
 networks:
   frontend:
-    internal: true
     ipam:
       config:
         - subnet: 172.30.80.0/28
