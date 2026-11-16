@@ -451,7 +451,11 @@ export type DifferencesMap = Record<
 export type PricingSyncValues = Partial<Record<RatioType, number | string>>
 export type PricingSyncModels = Record<
   string,
-  { current: PricingSyncValues; upstreams: Record<string, PricingSyncValues> }
+  {
+    current: PricingSyncValues
+    upstreams: Record<string, PricingSyncValues>
+    needs_review?: boolean
+  }
 >
 
 export type UpstreamChannelsResponse = {
@@ -486,5 +490,20 @@ export type UpstreamRatiosResponse = {
     differences: DifferencesMap
     prices: PricingSyncModels
     test_results: TestResult[]
+    copilot_sources?: Record<
+      string,
+      Record<string, { channel_id: number; model: string; version: string }>
+    >
   }
+}
+
+export type CopilotPricingStatus = {
+  channel_id: number
+  source_url: string
+  version: string
+  last_attempt_at: number
+  last_success_at: number
+  expires_at: number
+  error: string
+  blocked_models: string[]
 }

@@ -1,4 +1,11 @@
 # Chinese (Simplified) translations
+"GitHub Copilot pricing verification data is invalid": "GitHub Copilot 定价验证数据无效"
+"GitHub Copilot pricing has not been verified": "GitHub Copilot 定价尚未验证"
+"GitHub Copilot pricing verification has expired": "GitHub Copilot 定价验证已过期"
+"GitHub Copilot has no verified published price for this model": "此模型没有已验证的 GitHub Copilot 官方价格"
+"GitHub Copilot pricing changed or needs review": "GitHub Copilot 定价已变化或需要审核"
+copilot.pricing_attention_subject: "GitHub Copilot 定价需要处理"
+copilot.pricing_attention_body: "定价验证有 {{.Failed}} 项检查失败，{{.Blocked}} 个模型已被阻止。请在分组与模型定价中检查价格来源状态并审核价格。已验证价格在上次成功检查后 24 小时过期；未审核或已变化的价格将被阻止。"
 # 中文（简体）翻译文件
 
 # Errors returned to AI clients

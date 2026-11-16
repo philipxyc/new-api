@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -199,8 +200,8 @@ func TestGitHubCopilotModelDiscovery(t *testing.T) {
 	result, upstreamErr, err := plugin.CallConvertResponse(t.Context(), jsplugin.HookContext{Path: "/v1/models"}, http.StatusOK, nil,
 		[]byte(`{"data":[
 			{"id":"chat","supported_endpoints":["/chat/completions"]},
-			{"id":"gpt-6.1-terra","capabilities":{"type":"chat"},"supported_endpoints":["/responses"]},
-			{"id":"unverified-responses-model","supported_endpoints":["/responses"]},
+			{"id":"gpt-6.2-astra","name":"GPT-6.2 Astra","capabilities":{"type":"chat"},"supported_endpoints":["/responses","ws:/responses"]},
+			{"id":"future-claude","supported_endpoints":["/v1/messages"]},
 			{"id":"legacy","capabilities":{"type":"chat"}},
 			{"id":"text-embedding-3-small","capabilities":{"type":"embeddings"}},
 			{"id":"decision","capabilities":{"type":"decisions"},"supported_endpoints":["/chat/completions"]},
@@ -210,7 +211,10 @@ func TestGitHubCopilotModelDiscovery(t *testing.T) {
 	require.Nil(t, upstreamErr)
 	var catalog struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID                 string                    `json:"id"`
+			Name               string                    `json:"name"`
+			Routes             []dto.AdvancedCustomRoute `json:"routes"`
+			ResponsesWebSocket bool                      `json:"responses_websocket"`
 		} `json:"data"`
 	}
 	require.NoError(t, common.Unmarshal(result.Body, &catalog))
@@ -218,36 +222,33 @@ func TestGitHubCopilotModelDiscovery(t *testing.T) {
 	for _, entry := range catalog.Data {
 		ids = append(ids, entry.ID)
 	}
-	assert.Equal(t, []string{"chat", "gpt-6.1-terra", "legacy"}, ids)
-}
-
-func TestGitHubCopilotResponsesModelRouting(t *testing.T) {
-	plugin, ok := jsplugin.DefaultRegistry.Generation().Get("github-copilot")
-	require.True(t, ok)
-	for _, tc := range []struct {
-		path, converter, fallback string
-	}{
-		{"/v1/chat/completions", "openai_chat_completions_to_openai_responses", ""},
-		{"/v1/responses", "", "openai_responses_to_openai_chat_completions"},
-		{"/v1/messages", "claude_messages_to_openai_responses", "anthropic_messages_to_openai_chat_completions"},
-	} {
-		t.Run(tc.path, func(t *testing.T) {
-			for _, name := range []string{"gpt-5.3-codex", "gpt-5.4-nano", "gpt-5.6-luna", "gpt-5.6-sol-fast", "gpt-5.6-sol",
-				"gpt-5.6-terra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "grok-4.6", "grok-4.7", "mai-code-1.1-flash"} {
-				for _, prefix := range []string{"", "github-copilot/"} {
-					route, found := plugin.Meta.RelayRoute(tc.path, prefix+name)
-					require.True(t, found)
-					assert.Equal(t, "/responses", route.UpstreamPath, prefix+name)
-					assert.EqualValues(t, tc.converter, route.Converter, prefix+name)
-				}
-			}
-			for _, name := range []string{"gpt-4.1", "claude-sonnet-5", "github-copilot/claude-haiku-4.5"} {
-				route, found := plugin.Meta.RelayRoute(tc.path, name)
-				require.True(t, found)
-				assert.Equal(t, "/chat/completions", route.UpstreamPath, name)
-				assert.EqualValues(t, tc.fallback, route.Converter, name)
-			}
-		})
+	assert.Equal(t, []string{"chat", "gpt-6.2-astra", "future-claude"}, ids)
+	require.Len(t, catalog.Data, 3)
+	assert.Equal(t, "GPT-6.2 Astra", catalog.Data[1].Name)
+	assert.True(t, catalog.Data[1].ResponsesWebSocket)
+	for _, entry := range catalog.Data {
+		config := dto.AdvancedCustomConfig{Routes: entry.Routes}
+		require.NoError(t, config.Validate())
+		route, found := config.MatchPath("/v1/responses")
+		switch entry.ID {
+		case "chat":
+			require.True(t, found)
+			assert.Equal(t, "/chat/completions", route.UpstreamPath)
+			assert.Equal(t, "openai_responses_to_openai_chat_completions", route.Converter)
+		case "gpt-6.2-astra":
+			require.True(t, found)
+			assert.Equal(t, "/responses", route.UpstreamPath)
+			assert.Equal(t, "none", route.Converter)
+			route, found = config.MatchPath("/v1/chat/completions")
+			require.True(t, found)
+			assert.Equal(t, "openai_chat_completions_to_openai_responses", route.Converter)
+		case "future-claude":
+			assert.False(t, found, "do not invent an unsupported Responses-to-Claude converter")
+			route, found = config.MatchPath("/v1/messages")
+			require.True(t, found)
+			assert.Equal(t, "/v1/messages", route.UpstreamPath)
+			assert.Equal(t, "none", route.Converter)
+		}
 	}
 }
 

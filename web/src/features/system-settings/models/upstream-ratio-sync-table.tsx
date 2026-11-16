@@ -88,6 +88,7 @@ export function UpstreamRatioSyncTable(props: UpstreamRatioSyncTableProps) {
         .filter(
           ([model, values]) =>
             showUnchanged ||
+            values.needs_review ||
             Boolean(props.selectedSources[model]) ||
             Object.values(values.upstreams).some(
               (candidate) => !sameSyncPrice(values.current, candidate)
@@ -135,6 +136,7 @@ export function UpstreamRatioSyncTable(props: UpstreamRatioSyncTableProps) {
               (row) =>
                 row.prices.upstreams[source] &&
                 (showUnchanged ||
+                  row.prices.needs_review ||
                   !sameSyncPrice(
                     row.prices.current,
                     row.prices.upstreams[source]

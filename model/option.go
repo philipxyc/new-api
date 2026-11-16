@@ -202,6 +202,8 @@ func LoadOptionsFromDatabase() error {
 	defer requestPolicyOptionMutex.Unlock()
 	passkeyOptionMutex.Lock()
 	defer passkeyOptionMutex.Unlock()
+	modelPricingMutationMu.Lock()
+	defer modelPricingMutationMu.Unlock()
 	options, err := AllOption()
 	if err != nil {
 		return err
@@ -212,18 +214,29 @@ func LoadOptionsFromDatabase() error {
 		}
 	}()
 	passkeyOptions := make(map[string]string)
+	verification := ""
+	pricingFailed := false
 	for _, option := range options {
+		if option.Key == CopilotPricingStateKey {
+			verification = option.Value
+			continue
+		}
 		if IsPasskeyDomainOption(option.Key) {
 			passkeyOptions[option.Key] = option.Value
 			continue
 		}
 		err := updateOptionMap(option.Key, option.Value)
 		if err != nil {
+			pricingFailed = pricingFailed || IsModelPricingOption(option.Key)
 			common.SysLog(common.LogText("failed to update option map: %s", err.Error()))
 		}
 	}
 	applyPasskeyDomainOptions(passkeyOptions)
-	return nil
+	// An approval cannot become visible before the prices from the same load.
+	if pricingFailed {
+		verification = ""
+	}
+	return updateOptionMap(CopilotPricingStateKey, verification)
 }
 
 func SyncOptions(frequency int) {

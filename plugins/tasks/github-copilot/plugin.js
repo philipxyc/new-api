@@ -5,32 +5,13 @@ const GITHUB_API = "https://api.github.com";
 const CLIENT_ID = "Iv1.b507a08c87ecfe98";
 const USER_AGENT = "NewAPI-Copilot/1.0";
 const API_ORIGINS = ["https://api.githubcopilot.com", "https://api.business.githubcopilot.com", "https://api.enterprise.githubcopilot.com"];
-// Responses-only IDs verified against the authenticated Copilot catalog.
-// Keep explicit bindings: a new model must not inherit a guessed protocol.
-const RESPONSES_MODELS = [
-  "gpt-5.3-codex",
-  "gpt-5.4-nano",
-  "gpt-5.6-luna",
-  "gpt-5.6-sol-fast",
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-6.1-sol",
-  "gpt-6.1-terra",
-  "gpt-6-astra",
-  "gpt-6-luna",
-  "gpt-6-sol",
-  "grok-4.6",
-  "grok-4.7",
-  "mai-code-1.1-flash",
-];
-const RESPONSES_ALIASES = RESPONSES_MODELS.flatMap((model) => [model, "github-copilot/" + model]);
 
 export const meta = {
   apiVersion: 1,
   key: "github-copilot",
   name: "GitHub Copilot",
   icon: "GithubCopilot",
-  version: "1.1.0",
+  version: "1.2.0",
   author: { name: "QuantumNous" },
   description: {
     en: "GitHub Copilot chat with upstream device authorization",
@@ -42,31 +23,11 @@ export const meta = {
     en: "Save without a key, then sign in to GitHub on the channel",
     zh: "留空密钥保存渠道，然后在渠道中登录 GitHub",
   },
+  catalogRouting: true,
   relay: [
-    {
-      incoming_path: "/v1/chat/completions",
-      upstream_path: "/responses",
-      models: RESPONSES_ALIASES,
-      converter: "openai_chat_completions_to_openai_responses",
-    },
     { incoming_path: "/v1/chat/completions", upstream_path: "/chat/completions" },
-    { incoming_path: "/v1/responses", upstream_path: "/responses", models: RESPONSES_ALIASES },
-    {
-      incoming_path: "/v1/messages",
-      upstream_path: "/responses",
-      models: RESPONSES_ALIASES,
-      converter: "claude_messages_to_openai_responses",
-    },
-    {
-      incoming_path: "/v1/responses",
-      upstream_path: "/chat/completions",
-      converter: "openai_responses_to_openai_chat_completions",
-    },
-    {
-      incoming_path: "/v1/messages",
-      upstream_path: "/chat/completions",
-      converter: "anthropic_messages_to_openai_chat_completions",
-    },
+    { incoming_path: "/v1/responses", upstream_path: "/responses" },
+    { incoming_path: "/v1/messages", upstream_path: "/v1/messages" },
     { incoming_path: "/v1/models", upstream_path: "/models", converter: "plugin" },
   ],
 };
@@ -273,21 +234,45 @@ export function convertResponse(_ctx, response) {
   }
   const body = JSON.parse(response.body);
   if (!body || !Array.isArray(body.data)) throw new Error("Copilot returned an invalid model catalog");
+  const data = [];
+  for (const model of body.data) {
+    if (!model || typeof model.id !== "string" || !model.id || (model.capabilities && model.capabilities.type && model.capabilities.type !== "chat")) continue;
+    if (!Array.isArray(model.supported_endpoints)) continue;
+    const chat = model.supported_endpoints.includes("/chat/completions");
+    const responses = model.supported_endpoints.includes("/responses");
+    const messages = model.supported_endpoints.includes("/v1/messages");
+    const routes = [];
+    if (chat || responses || messages) {
+      routes.push({
+        incoming_path: "/v1/chat/completions",
+        upstream_path: chat ? "/chat/completions" : responses ? "/responses" : "/v1/messages",
+        converter: chat ? "none" : responses ? "openai_chat_completions_to_openai_responses" : "openai_chat_completions_to_anthropic_messages",
+      });
+      routes.push({
+        incoming_path: "/v1/messages",
+        upstream_path: messages ? "/v1/messages" : responses ? "/responses" : "/chat/completions",
+        converter: messages ? "none" : responses ? "claude_messages_to_openai_responses" : "anthropic_messages_to_openai_chat_completions",
+      });
+    }
+    if (responses || chat) {
+      routes.push({
+        incoming_path: "/v1/responses",
+        upstream_path: responses ? "/responses" : "/chat/completions",
+        converter: responses ? "none" : "openai_responses_to_openai_chat_completions",
+      });
+    }
+    if (routes.length) {
+      data.push({
+        id: model.id,
+        name: model.name,
+        object: "model",
+        owned_by: "github-copilot",
+        routes,
+        responses_websocket: responses && model.supported_endpoints.includes("ws:/responses"),
+      });
+    }
+  }
   return {
-    body: {
-      object: "list",
-      data: body.data
-        .filter(
-          (model) =>
-            model &&
-            typeof model.id === "string" &&
-            model.id.length > 0 &&
-            (!model.capabilities || !model.capabilities.type || model.capabilities.type === "chat") &&
-            (!Array.isArray(model.supported_endpoints) ||
-              model.supported_endpoints.includes("/chat/completions") ||
-              (RESPONSES_MODELS.includes(model.id) && model.supported_endpoints.includes("/responses")))
-        )
-        .map((model) => ({ id: model.id, object: "model", owned_by: "github-copilot" })),
-    },
+    body: { object: "list", data },
   };
 }

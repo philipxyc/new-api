@@ -103,7 +103,11 @@ func FetchModelList(ctx context.Context, plugin *jsplugin.LoadedPlugin, info *re
 		if err != nil {
 			return nil, err
 		}
-		raw, err := readLimited(resp, maxBodyBytes())
+		limit := maxBodyBytes()
+		if plugin.Meta.CatalogRouting {
+			limit = min(limit, 1<<20)
+		}
+		raw, err := readLimited(resp, limit)
 		if err != nil {
 			return nil, err
 		}

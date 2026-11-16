@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { ErrorState } from '@/components/error-state'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import {
@@ -32,12 +33,14 @@ import {
   invalidateModelPricing,
   type ModelPricingConfig,
   type ModelPricingChange,
+  type CopilotPricingReference,
 } from '@/features/model-pricing/api'
 import {
   getSitePricingCurrency,
   isValidPricingCurrency,
 } from '@/features/model-pricing/currency'
 import { applyPriceSyncSelections } from '@/features/model-pricing/pricing'
+import dayjs from '@/lib/dayjs'
 import { handleServerError } from '@/lib/handle-server-error'
 import {
   requireServerSuccess,
@@ -45,7 +48,11 @@ import {
 } from '@/lib/server-error-message'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
-import { fetchUpstreamRatios, getUpstreamChannels } from '../api'
+import {
+  fetchUpstreamRatios,
+  getUpstreamChannels,
+  getCopilotPricingStatus,
+} from '../api'
 import type {
   DifferencesMap,
   PricingSyncModels,
@@ -138,6 +145,15 @@ export function UpstreamRatioSync() {
   )
   const [preview, setPreview] = useState<SyncPreview | null>(null)
   const [loadingBaseline, setLoadingBaseline] = useState(false)
+  const [copilotSources, setCopilotSources] = useState<
+    Record<string, Record<string, CopilotPricingReference>>
+  >({})
+  const copilotStatus = useQuery({
+    queryKey: ['copilot-pricing-status'],
+    queryFn: async () =>
+      requireServerSuccess(await getCopilotPricingStatus()).data,
+    refetchInterval: 60_000,
+  })
   const { data: channelsData } = useQuery({
     queryKey: ['upstream-channels'],
     queryFn: async () => requireServerSuccess(await getUpstreamChannels()),
@@ -200,6 +216,7 @@ export function UpstreamRatioSync() {
       setPrices({})
       setDifferences({})
       setSelections({})
+      setCopilotSources({})
     },
     onSuccess: (response) => {
       const errors = response.data.test_results.filter(
@@ -219,6 +236,10 @@ export function UpstreamRatioSync() {
       }
       setDifferences(response.data.differences)
       setPrices(response.data.prices)
+      setCopilotSources(response.data.copilot_sources ?? {})
+      void queryClient.invalidateQueries({
+        queryKey: ['copilot-pricing-status'],
+      })
       if (!Object.keys(response.data.prices).length) {
         toast.success(t('No price differences found'))
       }
@@ -236,7 +257,11 @@ export function UpstreamRatioSync() {
         Object.fromEntries(
           Object.entries(previous).map(([name, row]) => [
             name,
-            { ...row, current: saved[name] ?? row.current },
+            {
+              ...row,
+              current: saved[name] ?? row.current,
+              needs_review: saved[name] ? false : row.needs_review,
+            },
           ])
         )
       )
@@ -245,6 +270,9 @@ export function UpstreamRatioSync() {
       setPricingBaseline(null)
       toast.success(t('Prices synced successfully'))
       await invalidateModelPricing(queryClient)
+      await queryClient.invalidateQueries({
+        queryKey: ['copilot-pricing-status'],
+      })
       try {
         setPricingBaseline(await getModelPricing())
       } catch (error) {
@@ -357,16 +385,35 @@ export function UpstreamRatioSync() {
         pricingBaseline.options,
         resolutions
       )
+      const changes = buildPricingChanges(
+        pricingBaseline,
+        pricingBaseline.options,
+        after
+      )
+      for (const [name, selection] of Object.entries(selections)) {
+        const reference = copilotSources[selection.source]?.[name]
+        if (!reference) continue
+        let change = changes.find((entry) => entry.model_name === name)
+        if (!change) {
+          const baseline = pricingBaseline.entries.find(
+            (entry) => entry.model_name === name
+          )
+          change = {
+            model_name: name,
+            expected_version:
+              baseline?.version ?? pricingBaseline.empty_version,
+            pricing: baseline?.configured ?? {},
+          }
+          changes.push(change)
+        }
+        change.copilot_source = { ...reference }
+      }
       // Freeze the exact save payload and its preview together. Changes to the
       // site exchange rate while this dialog is open cannot change the charge.
       setPreview({
         conflicts,
         resolutions,
-        changes: buildPricingChanges(
-          pricingBaseline,
-          pricingBaseline.options,
-          after
-        ),
+        changes,
         exchangeRateSummary: isValidPricingCurrency(currency)
           ? t('Current exchange rate: 1 USD = {{rate}} {{currency}}', {
               rate: String(rate),
@@ -387,6 +434,78 @@ export function UpstreamRatioSync() {
     isLoading || selectedModels.length === 0 || rate === null
   return (
     <div className='flex h-full min-h-0 flex-col gap-3'>
+      {copilotStatus.isError && (
+        <ErrorState
+          title={t('GitHub Copilot pricing')}
+          description={copilotStatus.error.message}
+          onRetry={() => void copilotStatus.refetch()}
+        />
+      )}
+      {copilotStatus.data?.map((status) => (
+        <Alert
+          key={status.channel_id}
+          role='status'
+          aria-label={t('GitHub Copilot pricing')}
+          variant={
+            status.error || status.blocked_models.length
+              ? 'destructive'
+              : 'default'
+          }
+          className='shrink-0'
+        >
+          <AlertTitle>
+            {t('GitHub Copilot pricing')} · {status.channel_id}
+          </AlertTitle>
+          <AlertDescription className='space-y-1 break-words'>
+            <div>
+              <a
+                href={status.source_url}
+                target='_blank'
+                rel='noopener noreferrer'
+              >
+                {t('Source')}
+              </a>
+              {' · '}
+              {t('Version')}: <code>{status.version || t('Never')}</code>
+            </div>
+            <div>
+              {t('Last verified')}:{' '}
+              {status.last_success_at
+                ? dayjs
+                    .unix(status.last_success_at)
+                    .format('YYYY-MM-DD HH:mm:ss')
+                : t('Never')}
+              {' · '}
+              {t('Last check time')}:{' '}
+              {status.last_attempt_at
+                ? dayjs
+                    .unix(status.last_attempt_at)
+                    .format('YYYY-MM-DD HH:mm:ss')
+                : t('Never')}
+              {' · '}
+              {t('Expires')}:{' '}
+              {status.expires_at
+                ? dayjs.unix(status.expires_at).format('YYYY-MM-DD HH:mm:ss')
+                : t('Never')}
+            </div>
+            {status.error && (
+              <div>
+                {t('Error')}: {status.error}
+              </div>
+            )}
+            {!!status.blocked_models.length && (
+              <div>
+                {t('Blocked models')}: {status.blocked_models.join(', ')}
+              </div>
+            )}
+            <div>
+              {t(
+                'Pricing checks run hourly; verified prices expire after 24 hours.'
+              )}
+            </div>
+          </AlertDescription>
+        </Alert>
+      ))}
       <div className='flex shrink-0 flex-wrap items-center gap-2'>
         <PriceAdjustmentSelect
           value={null}

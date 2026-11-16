@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -28,8 +29,10 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -42,6 +45,194 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+type copilotCatalogTransport struct {
+	target *url.URL
+	next   http.RoundTripper
+}
+
+func (transport copilotCatalogTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.URL.Scheme != "https" || request.URL.Host != "api.githubcopilot.com" {
+		return nil, fmt.Errorf("unexpected Copilot test destination")
+	}
+	copy := request.Clone(request.Context())
+	copy.URL.Scheme, copy.URL.Host, copy.Host = transport.target.Scheme, transport.target.Host, ""
+	return transport.next.RoundTrip(copy)
+}
+
+func TestCopilotCatalogRoutesFutureModels(t *testing.T) {
+	h := newRelayHarness(t)
+	previousRetry := common.RetryTimes
+	common.RetryTimes = 1
+	t.Cleanup(func() { common.RetryTimes = previousRetry })
+	source, err := plugins.Source("github-copilot")
+	require.NoError(t, err)
+	registerRelayPlugin(t, source)
+	target, err := url.Parse(h.upstream.URL)
+	require.NoError(t, err)
+	client := service.GetHttpClient()
+	previousTransport := client.Transport
+	client.Transport = copilotCatalogTransport{target: target, next: previousTransport}
+	t.Cleanup(func() { client.Transport = previousTransport })
+	const alias = "github-copilot/gpt-6.2-astra"
+	credential, err := (jsplugin.Credential{Plugin: "github-copilot",
+		Data: json.RawMessage(`{"copilotToken":"test-inference","apiOrigin":"https://api.githubcopilot.com"}`)}).Line()
+	require.NoError(t, err)
+	needsLogin, err := (jsplugin.Credential{Plugin: "github-copilot", NeedsLogin: true, Data: json.RawMessage(`{"copilotToken":"expired"}`)}).Line()
+	require.NoError(t, err)
+	ch := h.pluginChannel("github-copilot", needsLogin+"\n"+credential)
+	ch.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
+	origin := "https://api.githubcopilot.com"
+	ch.BaseURL, ch.Models, ch.ModelMapping = &origin, alias, new(`{"github-copilot/gpt-6.2-astra":"gpt-6.2-astra"}`)
+	h.install(t, ch)
+	settings := config.GlobalConfig.Get("billing_setting").(*billing_setting.BillingSetting)
+	previous := *settings
+	*settings = billing_setting.BillingSetting{BillingMode: map[string]string{alias: "tiered_expr"}, BillingExpr: map[string]string{alias: `tier("base", p * 2 + cr * 0.2 + c * 10)`}}
+	t.Cleanup(func() { *settings = previous })
+	now := common.GetTimestamp()
+	verifiedExpression := settings.BillingExpr[alias]
+	reference := model.CopilotPricingReference{ChannelID: ch.Id, Model: "gpt-6.2-astra", Version: model.CopilotPricingVersion("gpt-6.2-astra", verifiedExpression)}
+	verified := model.CopilotPricingSource{Version: strings.Repeat("a", 64), LastAttemptAt: now, LastSuccessAt: now, Expressions: map[string]string{"gpt-6.2-astra": verifiedExpression}}
+	verification := model.CopilotPricingState{Sources: map[int]model.CopilotPricingSource{ch.Id: verified}, Approvals: map[string]model.CopilotPricingReference{alias: reference}}
+	encodedVerification, err := common.Marshal(verification)
+	require.NoError(t, err)
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	previousVerification, existed := common.OptionMap[model.CopilotPricingStateKey]
+	common.OptionMap[model.CopilotPricingStateKey] = string(encodedVerification)
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		defer common.OptionMapRWMutex.Unlock()
+		if existed {
+			common.OptionMap[model.CopilotPricingStateKey] = previousVerification
+		} else {
+			delete(common.OptionMap, model.CopilotPricingStateKey)
+		}
+	})
+	const reply = `{"id":"resp_test","object":"response","model":"gpt-6.2-astra","created_at":1730000000,"status":"completed","output":[{"type":"message","id":"msg_test","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi","annotations":[]}]},{"type":"function_call","id":"fc_test","call_id":"call_test","name":"lookup","arguments":"{}","status":"completed"}],"usage":{"input_tokens":1000,"output_tokens":2000,"total_tokens":3000,"input_tokens_details":{"cached_tokens":400}}}`
+	h.upstream.respond = func(w http.ResponseWriter, _ int, request capturedRequest) {
+		assert.Equal(t, "Bearer test-inference", request.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		if request.URL == "/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"gpt-6.2-astra","name":"GPT-6.2 Astra","capabilities":{"type":"chat"},"supported_endpoints":["/responses"]}]}`)
+			return
+		}
+		assert.Equal(t, "/responses", request.URL, "route from advertised capability, not a model-name list")
+		assert.Equal(t, "gpt-6.2-astra", gjson.Get(request.Body, "model").Str)
+		assert.True(t, gjson.Get(request.Body, "input").Exists())
+		if !gjson.Get(request.Body, "stream").Bool() {
+			_, _ = io.WriteString(w, reply)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range []string{
+			`{"type":"response.created","response":{"id":"resp_test","model":"gpt-6.2-astra","created_at":1730000000,"status":"in_progress"}}`,
+			`{"type":"response.output_text.delta","output_index":0,"delta":"hi"}`,
+			`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_test","call_id":"call_test","name":"lookup"}}`,
+			`{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{}"}`,
+			`{"type":"response.completed","response":` + reply + `}`,
+		} {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+		}
+	}
+	for _, tc := range []struct{ path, input string }{
+		{"/v1/responses", `"input":"hello"`},
+		{"/v1/chat/completions", `"messages":[{"role":"user","content":"hello"}]`},
+		{"/v1/messages", `"max_tokens":32,"messages":[{"role":"user","content":"hello"}]`},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.path, stream), func(t *testing.T) {
+				outcome := h.post(t, tc.path, fmt.Sprintf(`{"model":%q,%s,"stream":%t}`, alias, tc.input, stream))
+				require.Equal(t, http.StatusOK, outcome.status, outcome.body)
+				assert.Contains(t, outcome.body, "lookup")
+				assert.Contains(t, outcome.body, "hi")
+				assert.Equal(t, 10640, outcome.quota, "all protocols settle the same actual input/cache/output usage")
+				assert.Equal(t, outcome.quota, outcome.log.Quota)
+			})
+		}
+	}
+	assert.Len(t, h.upstream.captured(), 7, "one cached discovery plus six inference requests")
+	previousTLS := common.TLSInsecureSkipVerify
+	t.Cleanup(func() { common.TLSInsecureSkipVerify = previousTLS })
+	common.TLSInsecureSkipVerify = true
+	insecure := h.post(t, "/v1/responses", `{"model":"github-copilot/gpt-6.2-astra","input":"hello"}`)
+	assert.NotEqual(t, http.StatusOK, insecure.status)
+	assert.Zero(t, insecure.quota)
+	assert.Len(t, h.upstream.captured(), 7, "disabling TLS verification must not send the Copilot credential")
+	common.TLSInsecureSkipVerify = previousTLS
+	delete(settings.BillingExpr, alias)
+	delete(settings.BillingMode, alias)
+	previousSelfUse := operation_setting.SelfUseModeEnabled
+	t.Cleanup(func() { operation_setting.SelfUseModeEnabled = previousSelfUse })
+	for _, mode := range []struct{ selfUse, acceptUnset bool }{{false, false}, {true, false}, {false, true}} {
+		operation_setting.SelfUseModeEnabled = mode.selfUse
+		require.NoError(t, model.UpdateUserSetting(h.userID, dto.UserSetting{AcceptUnsetRatioModel: mode.acceptUnset}))
+		unpriced := h.post(t, "/v1/responses", `{"model":"github-copilot/gpt-6.2-astra","input":"hello"}`)
+		assert.Equal(t, http.StatusBadRequest, unpriced.status, unpriced.body)
+		assert.Zero(t, unpriced.quota)
+	}
+	assert.Len(t, h.upstream.captured(), 7, "discovery must not enable inference without pricing")
+	settings.BillingMode[alias], settings.BillingExpr[alias] = "tiered_expr", `tier("free", fixed(0))`
+	free := h.post(t, "/v1/responses", `{"model":"github-copilot/gpt-6.2-astra","input":"hello"}`)
+	assert.Equal(t, http.StatusOK, free.status, free.body)
+	assert.Zero(t, free.quota, "an explicit administrator zero price is not an unset price")
+	assert.Len(t, h.upstream.captured(), 8)
+	settings.BillingExpr[alias] = verifiedExpression
+	operation_setting.SelfUseModeEnabled = true
+	for _, tc := range []struct {
+		name   string
+		source model.CopilotPricingSource
+		wantOK bool
+	}{
+		{"source outage within grace", model.CopilotPricingSource{LastAttemptAt: now, LastSuccessAt: now - 3600, Error: "HTTP 503", Expressions: verified.Expressions}, true},
+		{"source outage after expiry", model.CopilotPricingSource{LastAttemptAt: now, LastSuccessAt: now - model.CopilotPricingMaxAge, Error: "HTTP 503", Expressions: verified.Expressions}, false},
+		{"existing model price changed", model.CopilotPricingSource{LastSuccessAt: now, Expressions: map[string]string{"gpt-6.2-astra": `tier("changed", p * 4 + c * 20)`}}, false},
+		{"existing model missing from partial price source", model.CopilotPricingSource{LastSuccessAt: now, Expressions: map[string]string{"another-model": verifiedExpression}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verification.Sources[ch.Id] = tc.source
+			encoded, err := common.Marshal(verification)
+			require.NoError(t, err)
+			common.OptionMapRWMutex.Lock()
+			common.OptionMap[model.CopilotPricingStateKey] = string(encoded)
+			common.OptionMapRWMutex.Unlock()
+			before := len(h.upstream.captured())
+			outcome := h.post(t, "/v1/responses", `{"model":"github-copilot/gpt-6.2-astra","input":"hello"}`)
+			if tc.wantOK {
+				assert.Equal(t, http.StatusOK, outcome.status, outcome.body)
+				assert.Equal(t, 10640, outcome.quota)
+				assert.Len(t, h.upstream.captured(), before+1)
+			} else {
+				assert.Equal(t, http.StatusServiceUnavailable, outcome.status, outcome.body)
+				assert.Zero(t, outcome.quota)
+				assert.Len(t, h.upstream.captured(), before, "failed verification must stop before upstream dispatch")
+			}
+		})
+	}
+	t.Run("expired source allows a verified channel fallback", func(t *testing.T) {
+		healthy := h.pluginChannel("github-copilot", credential)
+		healthy.Name, healthy.BaseURL, healthy.Models = "verified fallback", &origin, alias
+		healthy.ModelMapping, healthy.Priority = ch.ModelMapping, new(int64(-1))
+		require.NoError(t, healthy.Insert())
+		model.InitChannelCache()
+		verification.Sources[ch.Id] = model.CopilotPricingSource{LastSuccessAt: now - model.CopilotPricingMaxAge, Expressions: verified.Expressions}
+		verification.Sources[healthy.Id] = verified
+		encoded, err := common.Marshal(verification)
+		require.NoError(t, err)
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap[model.CopilotPricingStateKey] = string(encoded)
+		common.OptionMapRWMutex.Unlock()
+		before := len(h.upstream.captured())
+		outcome := h.post(t, "/v1/responses", `{"model":"github-copilot/gpt-6.2-astra","input":"hello"}`)
+		require.Equal(t, http.StatusOK, outcome.status, outcome.body)
+		assert.Equal(t, 10640, outcome.quota)
+		assert.Equal(t, healthy.Id, outcome.log.ChannelId)
+		assert.Len(t, h.upstream.captured(), before+2, "only the healthy channel fetches its catalog and sends inference")
+	})
+}
 
 const (
 	relayTestToken = "providerrelaytoken"

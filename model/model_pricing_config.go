@@ -26,10 +26,11 @@ import (
 type PricingValues map[string]any
 
 type ModelPricingChange struct {
-	ModelName       string        `json:"model_name"`
-	ExpectedVersion string        `json:"expected_version"`
-	Pricing         PricingValues `json:"pricing"`
-	Reset           bool          `json:"reset,omitempty"`
+	ModelName       string                   `json:"model_name"`
+	ExpectedVersion string                   `json:"expected_version"`
+	Pricing         PricingValues            `json:"pricing"`
+	Reset           bool                     `json:"reset,omitempty"`
+	CopilotSource   *CopilotPricingReference `json:"copilot_source,omitempty"`
 }
 
 type ModelPricingEntry struct {
@@ -641,8 +642,10 @@ func UpdateModelPricing(changes []ModelPricingChange) error {
 			return ErrModelPricingConflict
 		}
 	}
-	return mutateModelPricingOptions(func(_ *gorm.DB, values map[string]map[string]any) error {
+	verificationUpdate := make(map[string]string)
+	return mutateModelPricingOptions(func(tx *gorm.DB, values map[string]map[string]any) error {
 		defaults := defaultPricingMaps()
+		var verification *CopilotPricingState
 		for _, change := range changes {
 			previous := modelPricingValues(values, change.ModelName)
 			if ModelPricingVersion(previous) != change.ExpectedVersion {
@@ -655,10 +658,31 @@ func UpdateModelPricing(changes []ModelPricingChange) error {
 			if err := validateModelPricing(change.ModelName, pricing, previous); err != nil {
 				return err
 			}
+			if change.CopilotSource != nil {
+				if verification == nil {
+					var err error
+					verification, err = readCopilotPricingStateForUpdate(tx)
+					if err != nil {
+						return err
+					}
+				}
+				reference := *change.CopilotSource
+				if err := verification.Sources[reference.ChannelID].CheckReference(reference, common.GetTimestamp()); err != nil {
+					return err
+				}
+				verification.Approvals[change.ModelName] = reference
+			}
 			replaceModelPricing(values, change.ModelName, pricing)
 		}
+		if verification != nil {
+			committedVerification, err := writeCopilotPricingState(tx, verification)
+			if err != nil {
+				return err
+			}
+			verificationUpdate[CopilotPricingStateKey] = committedVerification
+		}
 		return nil
-	})
+	}, verificationUpdate)
 }
 
 // UpdateModelPricingOptions keeps legacy single-option callers on the same
@@ -698,10 +722,10 @@ func UpdateModelPricingOptions(updates map[string]string) error {
 			}
 		}
 		return nil
-	})
+	}, nil)
 }
 
-func mutateModelPricingOptions(mutate func(*gorm.DB, map[string]map[string]any) error) error {
+func mutateModelPricingOptions(mutate func(*gorm.DB, map[string]map[string]any) error, additionalOptions map[string]string) error {
 	modelPricingMutationMu.Lock()
 	defer modelPricingMutationMu.Unlock()
 	var committed map[string]map[string]any
@@ -754,5 +778,10 @@ func mutateModelPricingOptions(mutate func(*gorm.DB, map[string]map[string]any) 
 	}
 	RefreshPricing()
 	ratio_setting.InvalidateExposedDataCache()
+	for key, value := range additionalOptions {
+		if err := updateOptionMap(key, value); err != nil {
+			return err
+		}
+	}
 	return nil
 }

@@ -113,6 +113,8 @@ type Meta struct {
 	// Relay is the provider part: the Advanced Custom routes a type-61
 	// channel bound to the plugin serves.
 	Relay []dto.AdvancedCustomRoute `json:"relay,omitempty"`
+	// CatalogRouting selects per-model routes from the authenticated model list.
+	CatalogRouting bool `json:"catalogRouting,omitempty"`
 	// ConfigSchema is the schema of a request processing instance's config.
 	ConfigSchema *ConfigSchema `json:"configSchema,omitempty"`
 	// ChannelConfig is the schema of the plugin config of a type-61 channel
@@ -593,6 +595,18 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 	}
 	if err = normalizeV1Meta(&meta); err != nil {
 		return nil, err
+	}
+	if meta.CatalogRouting {
+		if _, ok := meta.ModelListRoute(); !ok {
+			return nil, fmt.Errorf("plugin %s catalogRouting requires a /v1/models relay route", meta.Key)
+		}
+		for _, route := range meta.Relay {
+			switch route.IncomingPath {
+			case "/v1/models", "/v1/chat/completions", "/v1/responses", "/v1/messages":
+			default:
+				return nil, fmt.Errorf("plugin %s catalogRouting does not support %s", meta.Key, route.IncomingPath)
+			}
+		}
 	}
 	engine.key = meta.Key
 	engine.version = meta.Version
@@ -1374,7 +1388,7 @@ func decodeMeta(value any) (Meta, error) {
 	}
 	for field := range object {
 		switch field {
-		case "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions", "relay", "configSchema", "optional", "samples", "channelConfig", "keyHint":
+		case "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions", "relay", "catalogRouting", "configSchema", "optional", "samples", "channelConfig", "keyHint":
 		default:
 			return Meta{}, &UnknownMetaFieldError{Field: field}
 		}
@@ -1520,6 +1534,11 @@ func decodeMeta(value any) (Meta, error) {
 		meta.Relay, err = decodeRelayRoutes(relay)
 		if err != nil {
 			return Meta{}, err
+		}
+	}
+	if value, exists := object["catalogRouting"]; exists {
+		if meta.CatalogRouting, ok = value.(bool); !ok {
+			return Meta{}, fmt.Errorf("plugin meta catalogRouting must be a boolean")
 		}
 	}
 	if value, exists := object["optional"]; exists {

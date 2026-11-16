@@ -82,6 +82,13 @@ export type ModelPricingChange = {
   expected_version: string
   pricing: PricingValues
   reset?: boolean
+  copilot_source?: CopilotPricingReference
+}
+
+export type CopilotPricingReference = {
+  channel_id: number
+  model: string
+  version: string
 }
 
 export type ModelPricingConversion = Partial<ModelPricingDescription> & {

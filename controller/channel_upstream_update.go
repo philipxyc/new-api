@@ -521,7 +521,15 @@ func fetchAdvancedCustomUpstreamModelIDs(channel *model.Channel, baseURL string)
 // convertResponse turns the reply into an OpenAI model list, chaining more
 // pages when the vendor pages it.
 func fetchProviderPluginUpstreamModelIDs(channel *model.Channel, plugin *jsplugin.LoadedPlugin) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	body, err := fetchProviderPluginModelList(context.Background(), channel, plugin)
+	if err != nil {
+		return nil, err
+	}
+	return parseOpenAIModelIDs(body)
+}
+
+func fetchProviderPluginModelList(parent context.Context, channel *model.Channel, plugin *jsplugin.LoadedPlugin) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, time.Minute)
 	defer cancel()
 	key, err := service.PluginModelListKey(ctx, channel, plugin)
 	if err != nil {
@@ -542,7 +550,19 @@ func fetchProviderPluginUpstreamModelIDs(channel *model.Channel, plugin *jsplugi
 			ApiKey:               key,
 			ChannelSetting:       channel.GetSetting(),
 			ChannelOtherSettings: settings,
+			HeadersOverride:      channel.GetHeaderOverride(),
 		},
+	}
+	if plugin.Meta.CatalogRouting {
+		client, err := providerplugin.ModelCatalogClient(info)
+		if err != nil {
+			return nil, err
+		}
+		catalog, err := providerplugin.FetchModelCatalog(ctx, plugin, info, client, true)
+		if err != nil {
+			return nil, sanitizeFetchModelsError(err, key)
+		}
+		return common.Marshal(catalog)
 	}
 	body, err := providerplugin.FetchModelList(ctx, plugin, info, providerplugin.ManagementClient{
 		Override: func(headers http.Header, apiKey string) error {
@@ -555,7 +575,7 @@ func fetchProviderPluginUpstreamModelIDs(channel *model.Channel, plugin *jsplugi
 	if err != nil {
 		return nil, sanitizeFetchModelsError(err, key)
 	}
-	return parseOpenAIModelIDs(body)
+	return body, nil
 }
 
 // pluginKeyIndex is the index of the key line key among the channel's keys,

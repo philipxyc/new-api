@@ -84,13 +84,18 @@ or `https://api.enterprise.githubcopilot.com`). Credentials never go to an
 arbitrary Base URL or a redirected credential exchange. Expiring inference
 tokens are renewed using the server-side GitHub authorization.
 
-Fetch the accessible models after sign-in. Discovery excludes embeddings and
-decision models. Verified Responses-only model IDs use native `/responses`;
-Chat Completions and Messages clients use the host's existing Responses
-converters for those IDs. Other chat models retain their Chat Completions
-routes. No extra proxy, authentication state machine or billing engine is used.
-The endpoint bindings are an explicit catalog snapshot, not family-name guesses.
+Fetch the accessible models after sign-in. Discovery excludes embeddings,
+decision models and entries without supported endpoint metadata. Routes come
+from that account's advertised capabilities, not a model-ID list. The gateway
+prefers the requested native protocol and otherwise uses an existing converter:
+Responses-only models work through Responses, Chat Completions and Messages.
+Native Messages is used when advertised; a Messages-only upstream has no
+Responses conversion. WebSocket additionally requires an advertised
+`ws:/responses` capability and the channel's WebSocket setting.
+No extra proxy, authentication state machine or billing engine is used.
 Streaming, tools and usage settlement remain the existing relay's responsibility.
+Catalogs are cached per account/channel for five minutes; a manual model
+refresh replaces the cache. Unavailable or invalid catalogs fail closed.
 
 Use client aliases such as `github-copilot/gpt-6.1-terra` with channel
 `model_mapping` set to `{"github-copilot/gpt-6.1-terra":"gpt-6.1-terra"}`.
@@ -116,11 +121,58 @@ New API quotas do not guarantee GitHub subscription capacity.
 
 ### Same-day model updates
 
-Refresh the authenticated account catalog, not just a public model list. Check
-the new ID's endpoint capabilities and GitHub's published rates. Existing chat
-protocols need only a reviewed alias, mapping and price; new Responses-only IDs
-also need an explicit plugin route binding. Changed protocols require a plugin
-change, not a guessed route. Keep unpriced or unverified models disabled.
+Refresh the authenticated account catalog, not just a public model list.
+New model IDs using existing advertised protocols need no source change.
+Add the reviewed alias and mapping, then use the existing pricing
+synchronization screen: select the saved Copilot channel and its default
+pricing endpoint. For official Copilot origins, this fetches
+[GitHub's published pricing](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing)
+through its Markdown API, matches catalog display names, and proposes
+namespaced billing expressions in the normal price-difference review.
+Checks save source-verification metadata, not charge rates. Price changes and
+approval of the displayed source version are saved together only when the
+administrator confirms the existing version-checked pricing review. Matching
+prices remain selectable when their source needs approval.
+
+The importer includes whole-context thresholds and cache-write rates, but
+excludes footnoted promotions and unmatched models. Ambiguous names, incomplete
+tiers, changed units or unsupported pricing columns stop the import instead of
+guessing. The authenticated catalog itself contains no prices. Existing
+built-ins remain offline defaults; explicit saved prices are not automatically
+overwritten. New billing categories or protocols still require implementation.
+Keep unpriced or unverified models disabled. Catalog-routed requests reject
+missing prices even in self-use mode or with accept-unset-price enabled.
+Explicit free prices and zero group multipliers remain administrator choices;
+no upstream failure creates either.
+
+The existing leased system-task runner checks Copilot pricing hourly. The
+pricing synchronization page shows the source URL and SHA-256, last attempt,
+last successful verification, expiry, failures and blocked models. Its
+root-only status API is `GET /api/option/copilot_pricing`. The `copilot_pricing`
+system-task history also records outcomes; failures and blocked enabled models
+are logged, and state changes notify the existing channel-notification
+subscribers. Configure an administrator email/webhook notification destination
+for delivery outside the console; no new notification service is added.
+
+Previously verified and approved prices remain usable during a source outage
+for **at most 24 hours from the last successful check**. Failure does not renew
+that deadline or replace stored prices. Newly discovered/unpriced models,
+missing source entries, changed model prices and expired verification block
+dispatch until a fresh check and explicit review. A changed price blocks that
+model immediately, without waiting for the outage grace period. Self-use mode
+and accept-unset-price cannot bypass these checks. Approvals are bound to the
+actual mapped upstream model and its reviewed price fingerprint.
+
+Verification and approvals are stored in the existing options table, included
+in database backups, and survive container replacement. The general settings
+API cannot overwrite this server-owned metadata. No database columns are
+added. On the first upgrade to verification enforcement, refresh and approve
+the existing Copilot models before expecting the authenticated deployment smoke
+check to pass. Retained legacy models without published rates also require
+attention; their generic fallback price is not proof of verified Copilot pricing.
+
+Catalog discovery, pricing retrieval and Copilot relay reject disabled TLS
+verification. The public pricing request never carries a Copilot credential.
 Run a bounded inference, stream/tool probe and usage/quota reconciliation before
 enabling a model for clients. Ship source changes through the normal checks,
 immutable image build and digest deployment. Preserve explicit admin overrides

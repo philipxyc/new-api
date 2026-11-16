@@ -185,7 +185,8 @@ export function SyncSourcePriceCell(props: {
   const mode = selected ? (context.adjustments[model] ?? 'keep') : 'keep'
   const result = selected ? context.adjustedPrices[model] : undefined
   const same = sameSyncPrice(values, props.row.prices.current)
-  const canSelect = !same || context.showUnchanged || selected
+  const canSelect =
+    !same || props.row.prices.needs_review || context.showUnchanged || selected
   const confident = Object.values(props.row.differences ?? {}).every(
     (diff) => diff?.confidence?.[props.source] !== false
   )

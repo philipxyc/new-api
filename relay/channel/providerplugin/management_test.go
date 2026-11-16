@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -19,6 +20,59 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProviderModelCatalogIsolationAndRefresh(t *testing.T) {
+	plugin, err := jsplugin.NewRegistry().Register(`
+export const meta = {
+  apiVersion: 1, key: "catalog-test", name: "Catalog", version: "1.0.0", author: {name: "Test"}, catalogRouting: true,
+  relay: [{incoming_path: "/v1/chat/completions", upstream_path: "/chat"}, {incoming_path: "/v1/models", upstream_path: "/models"}]
+};`, jsplugin.Options{})
+	require.NoError(t, err)
+	t.Cleanup(modelCatalogs.Purge)
+	var calls atomic.Int32
+	var invalid atomic.Bool
+	seenKeys := make(chan string, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		seenKeys <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		if invalid.Load() {
+			_, _ = w.Write([]byte(`{"data":[{"id":"replacement","routes":[{"incoming_path":"/v1/chat/completions","upstream_path":"https://untrusted.example/chat"}]}]}`))
+			return
+		}
+		body, err := common.Marshal(ModelCatalog{Data: []CatalogModel{{
+			ID: fmt.Sprintf("model-%d", call), Routes: []dto.AdvancedCustomRoute{{IncomingPath: "/v1/chat/completions", UpstreamPath: "/chat"}},
+		}}})
+		require.NoError(t, err)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(upstream.Close)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
+		ChannelBaseUrl: upstream.URL, ApiKey: "account-one", ChannelOtherSettings: dto.ChannelOtherSettings{AdvancedCustom: plugin.Meta.ChannelRelayConfig(nil)},
+	}}
+	client := ManagementClient{Override: func(http.Header, string) error { return nil }, Send: upstream.Client().Do}
+	first, err := FetchModelCatalog(t.Context(), plugin, info, client, false)
+	require.NoError(t, err)
+	cached, err := FetchModelCatalog(t.Context(), plugin, info, client, false)
+	require.NoError(t, err)
+	assert.Equal(t, first.Data, cached.Data)
+	assert.Equal(t, int32(1), calls.Load())
+	info.ApiKey = "account-two"
+	second, err := FetchModelCatalog(t.Context(), plugin, info, client, false)
+	require.NoError(t, err)
+	assert.NotEqual(t, first.Data[0].ID, second.Data[0].ID)
+	assert.Equal(t, "Bearer account-one", <-seenKeys)
+	assert.Equal(t, "Bearer account-two", <-seenKeys)
+	refreshed, err := FetchModelCatalog(t.Context(), plugin, info, client, true)
+	require.NoError(t, err)
+	assert.NotEqual(t, second.Data[0].ID, refreshed.Data[0].ID)
+	invalid.Store(true)
+	_, err = FetchModelCatalog(t.Context(), plugin, info, client, true)
+	require.ErrorContains(t, err, "exceeds its manifest")
+	_, err = FetchModelCatalog(t.Context(), plugin, info, client, false)
+	require.Error(t, err, "a failed refresh must not retain old routes")
+	assert.Equal(t, int32(4), calls.Load(), "briefly cache failures instead of hammering the model endpoint")
+}
 
 // pagedModelsPlugin exchanges its key for a numbered token, signs every
 // request with it and reads the vendor's model list page by page.

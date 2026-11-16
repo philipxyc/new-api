@@ -323,6 +323,16 @@ func FetchUpstreamRatios(c *gin.Context) {
 			ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.Timeout)*time.Second)
 			defer cancel()
 
+			if isCopilotPricingSource(chItem) {
+				data, err := fetchCopilotPrices(ctx, chItem)
+				if err != nil {
+					ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
+				} else {
+					ch <- upstreamResult{Name: uniqueName, Data: data}
+				}
+				return
+			}
+
 			httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 			if err != nil {
 				logger.LogWarn(c.Request.Context(), common.LogText("build request failed: %s", err.Error()))
@@ -576,12 +586,16 @@ func FetchUpstreamRatios(c *gin.Context) {
 	localData := effectivePricingSyncData(getLocalPricingSyncData())
 
 	var testResults []dto.TestResult
+	copilotSources := make(map[string]any)
 	var successfulChannels []struct {
 		name string
 		data map[string]any
 	}
 
 	for r := range ch {
+		if references, ok := r.Data["copilot_sources"]; ok {
+			copilotSources[r.Name] = references
+		}
 		if r.Err != "" {
 			testResults = append(testResults, dto.TestResult{
 				Name:   r.Name,
@@ -601,9 +615,19 @@ func FetchUpstreamRatios(c *gin.Context) {
 	}
 
 	differences := buildDifferences(localData, successfulChannels)
+	var verification *model.CopilotPricingState
+	if len(copilotSources) > 0 {
+		var err error
+		verification, err = model.GetCopilotPricingState()
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	type modelSyncPrices struct {
-		Current   map[string]any            `json:"current"`
-		Upstreams map[string]map[string]any `json:"upstreams"`
+		Current     map[string]any            `json:"current"`
+		Upstreams   map[string]map[string]any `json:"upstreams"`
+		NeedsReview bool                      `json:"needs_review,omitempty"`
 	}
 	models := make(map[string]struct{}, len(differences))
 	for name := range differences {
@@ -629,6 +653,12 @@ func FetchUpstreamRatios(c *gin.Context) {
 			}
 		}
 		for _, channel := range successfulChannels {
+			if references, ok := copilotSources[channel.name].(map[string]model.CopilotPricingReference); ok && verification != nil {
+				if reference, found := references[name]; found {
+					approved := verification.Approvals[name]
+					row.NeedsReview = row.NeedsReview || approved.Model != reference.Model || approved.Version != reference.Version
+				}
+			}
 			candidate := modelPricingSyncValues(channel.data, name)
 			if expressionPriority && candidate[billing_setting.BillingModeField] != billing_setting.BillingModeTieredExpr {
 				continue
@@ -648,9 +678,10 @@ func FetchUpstreamRatios(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"differences":  differences,
-			"prices":       prices,
-			"test_results": testResults,
+			"differences":     differences,
+			"prices":          prices,
+			"test_results":    testResults,
+			"copilot_sources": copilotSources,
 		},
 	})
 }

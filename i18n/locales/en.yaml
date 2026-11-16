@@ -1,4 +1,11 @@
 # English translations
+"GitHub Copilot pricing verification data is invalid": "GitHub Copilot pricing verification data is invalid"
+"GitHub Copilot pricing has not been verified": "GitHub Copilot pricing has not been verified"
+"GitHub Copilot pricing verification has expired": "GitHub Copilot pricing verification has expired"
+"GitHub Copilot has no verified published price for this model": "GitHub Copilot has no verified published price for this model"
+"GitHub Copilot pricing changed or needs review": "GitHub Copilot pricing changed or needs review"
+copilot.pricing_attention_subject: "GitHub Copilot pricing needs attention"
+copilot.pricing_attention_body: "Pricing verification has {{.Failed}} failed checks and {{.Blocked}} blocked models. Review the source status and prices in Group & Model Pricing. Previously verified prices expire 24 hours after the last successful check; unreviewed or changed prices are blocked."
 
 # Errors returned to AI clients
 common.database_error: "Database error, please contact the administrator"

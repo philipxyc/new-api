@@ -610,6 +610,7 @@ export function parseBalance() { return {unlimited: true}; }
 		Success bool `json:"success"`
 		Data    []struct {
 			Key                string                 `json:"key"`
+			Models             []string               `json:"models"`
 			ChannelConfig      json.RawMessage        `json:"channelConfig"`
 			KeyHint            jsplugin.LocalizedText `json:"keyHint"`
 			CheckKey           bool                   `json:"checkKey"`
@@ -633,6 +634,8 @@ export function parseBalance() { return {unlimited: true}; }
 			assert.True(t, option.ResponsesWebsocket)
 		case "caps-bare":
 			found++
+			assert.NotNil(t, option.Models, "provider-only bind options must return an empty model array, not null")
+			assert.Empty(t, option.Models)
 			assert.Equal(t, "null", string(option.ChannelConfig))
 			assert.Nil(t, option.KeyHint)
 			assert.False(t, option.CheckKey)

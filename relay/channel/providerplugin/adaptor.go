@@ -62,12 +62,15 @@ type Adaptor struct {
 	// request, billed after the response is relayed.
 	tools map[string]int
 	// prepared is set once prepareKey ran for the request.
-	prepared bool
+	prepared         bool
+	catalogResolved  bool
+	catalogWebSocket bool
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 	a.Adaptor.Init(info)
 	a.credential, a.prepared = nil, false
+	a.catalogResolved, a.catalogWebSocket = false, false
 	credential, ok := jsplugin.ParseCredential(info.ApiKey)
 	if !ok {
 		return
@@ -165,7 +168,37 @@ func (a *Adaptor) sign(ctx context.Context, info *relaycommon.RelayInfo, method 
 // PrepareWebSocket binds the plugin and the key before a client WebSocket
 // session dials the upstream, as DoRequest does for a request.
 func (a *Adaptor) PrepareWebSocket(c *gin.Context, info *relaycommon.RelayInfo) error {
-	return a.prepareKey(c, info)
+	if err := a.prepareKey(c, info); err != nil {
+		return err
+	}
+	if err := a.prepareCatalogRoute(c, info); err != nil {
+		return err
+	}
+	if a.plugin.Meta.CatalogRouting && (!a.catalogWebSocket || !a.route.IsNative()) {
+		return errors.New("provider catalog does not support native Responses WebSocket for this model")
+	}
+	return nil
+}
+
+func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
+	if err := a.prepareCatalogRoute(c, info); err != nil {
+		return nil, err
+	}
+	return a.Adaptor.ConvertOpenAIRequest(c, info, request)
+}
+
+func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	if err := a.prepareCatalogRoute(c, info); err != nil {
+		return nil, err
+	}
+	return a.Adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+}
+
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+	if err := a.prepareCatalogRoute(c, info); err != nil {
+		return nil, err
+	}
+	return a.Adaptor.ConvertClaudeRequest(c, info, request)
 }
 
 // prepareKey binds the plugin and its route, refreshes a credential that
@@ -175,18 +208,27 @@ func (a *Adaptor) prepareKey(c *gin.Context, info *relaycommon.RelayInfo) error 
 	if a.prepared {
 		return nil
 	}
-	a.prepared = true
 	if err := a.bind(c, info); err != nil {
 		return err
+	}
+	if a.plugin.Meta.Key == "github-copilot" && (common.TLSInsecureSkipVerify || info.ChannelSetting.TLSInsecureSkipVerify) {
+		return fmt.Errorf("GitHub Copilot requires verified TLS")
 	}
 	if err := a.useFreshCredential(c, info); err != nil {
 		return err
 	}
-	return a.useToken(c, info)
+	if err := a.useToken(c, info); err != nil {
+		return err
+	}
+	a.prepared = true
+	return nil
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
 	if err := a.prepareKey(c, info); err != nil {
+		return nil, err
+	}
+	if err := a.prepareCatalogRoute(c, info); err != nil {
 		return nil, err
 	}
 	_, pluginRoute := jsplugin.SplitProviderConverter(a.route.Converter)

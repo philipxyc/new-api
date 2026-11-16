@@ -50,6 +50,151 @@ import { UpstreamRatioSyncTable } from '../models/upstream-ratio-sync-table'
 import type { PricingSyncModels } from '../types'
 
 const expression = 'tier("base", p * 2 + c * 8 + cr * 0)'
+
+it('reviews unchanged Copilot prices with the fetched source version and shows verification status', async () => {
+  const alias = 'github-copilot/future-model'
+  const reference = {
+    channel_id: 1,
+    model: 'future-model',
+    version: 'reviewed-source',
+  }
+  const configured = {
+    'billing_setting.billing_mode': 'tiered_expr',
+    'billing_setting.billing_expr': expression,
+  }
+  const prices = { billing_mode: 'tiered_expr', billing_expr: expression }
+  const responses: Record<string, unknown> = {
+    '/api/option/copilot_pricing': [
+      {
+        channel_id: 1,
+        source_url:
+          'https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing',
+        version: 'document-version',
+        last_attempt_at: 1790000100,
+        last_success_at: 1790000000,
+        expires_at: 1790086400,
+        error: 'HTTP 503',
+        blocked_models: [alias],
+      },
+    ],
+    '/api/ratio_sync/channels': [
+      {
+        id: 1,
+        name: 'GitHub Copilot',
+        type: 61,
+        status: 1,
+        base_url: 'https://api.githubcopilot.com',
+      },
+    ],
+    '/api/option/model_pricing': {
+      entries: [
+        {
+          model_name: alias,
+          version: 'existing-price',
+          configured,
+          effective: configured,
+        },
+      ],
+      empty_version: 'empty',
+      options: pricingOptions({
+        'billing_setting.billing_mode': JSON.stringify({
+          [alias]: 'tiered_expr',
+        }),
+        'billing_setting.billing_expr': JSON.stringify({
+          [alias]: expression,
+        }),
+      }),
+    },
+  }
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (!Object.hasOwn(responses, url)) throw new Error(`Unexpected GET ${url}`)
+    return { data: { success: true, data: responses[url] } }
+  })
+  vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        prices: {
+          [alias]: {
+            current: prices,
+            upstreams: { 'GitHub Copilot(1)': prices },
+            needs_review: true,
+          },
+        },
+        differences: {},
+        test_results: [{ name: 'GitHub Copilot(1)', status: 'success' }],
+        copilot_sources: { 'GitHub Copilot(1)': { [alias]: reference } },
+      },
+    },
+  })
+  const patch = vi
+    .spyOn(api, 'patch')
+    .mockResolvedValue({ data: { success: true } })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <UpstreamRatioSync />
+    </QueryClientProvider>
+  )
+  const status = await screen.findByRole('status', {
+    name: 'GitHub Copilot pricing',
+  })
+  expect(within(status).getByText('document-version')).toBeVisible()
+  expect(status).toHaveTextContent('HTTP 503')
+  expect(status).toHaveTextContent('Last verified')
+  expect(status).toHaveTextContent('Expires')
+  expect(status).toHaveTextContent(alias)
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: 'Select price sources' }))
+  await user.click(
+    await screen.findByRole('checkbox', { name: 'Select GitHub Copilot' })
+  )
+  await user.click(screen.getByRole('button', { name: 'Confirm Selection' }))
+  await user.click(
+    await screen.findByRole('checkbox', {
+      name: /Select price for .*future-model from GitHub Copilot/,
+    })
+  )
+  await user.click(screen.getByRole('button', { name: 'Apply Sync' }))
+  await user.click(
+    await screen.findByRole('button', { name: 'Confirm Changes' })
+  )
+  await waitFor(() =>
+    expect(patch).toHaveBeenCalledWith('/api/option/model_pricing', {
+      changes: [
+        {
+          model_name: alias,
+          expected_version: 'existing-price',
+          pricing: configured,
+          copilot_source: reference,
+        },
+      ],
+    })
+  )
+})
+
+it('shows a failed verification-status request and retries without claiming fresh prices', async () => {
+  vi.spyOn(api, 'get')
+    .mockRejectedValueOnce(new Error('Status unavailable'))
+    .mockResolvedValue({ data: { success: true, data: [] } })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <UpstreamRatioSync />
+    </QueryClientProvider>
+  )
+  expect(await screen.findByText('Status unavailable')).toBeVisible()
+  await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }))
+  await waitFor(() =>
+    expect(screen.queryByText('Status unavailable')).not.toBeInTheDocument()
+  )
+  expect(screen.getByRole('button', { name: 'Apply Sync' })).toBeDisabled()
+})
+
 const differences = {
   m: {
     model_ratio: {
@@ -325,6 +470,9 @@ describe('pricing synchronization', () => {
   it('previews the expression, rejects a stale save and reloads before applying without residual ratio differences', async () => {
     let version = 'v1'
     const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
+      if (url === '/api/option/copilot_pricing') {
+        return { data: { success: true, data: [] } }
+      }
       if (url === '/api/ratio_sync/channels') {
         return {
           data: {
@@ -494,6 +642,9 @@ describe('pricing synchronization', () => {
 
 it('shows a source failure instead of a no-differences result and retries the selected source', async () => {
   vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/option/copilot_pricing') {
+      return { data: { success: true, data: [] } }
+    }
     if (url === '/api/ratio_sync/channels') {
       return {
         data: {
@@ -671,27 +822,32 @@ async function renderAdjustmentSync(
       usdExchangeRate: 7,
     },
   })
-  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
-    data: {
-      success: true,
-      data:
-        url === '/api/ratio_sync/channels'
-          ? [
-              {
-                id: 7,
-                name: 'Upstream',
-                base_url: 'https://example.test',
-                type: 1,
-                status: 1,
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/option/copilot_pricing') {
+      return { data: { success: true, data: [] } }
+    }
+    return {
+      data: {
+        success: true,
+        data:
+          url === '/api/ratio_sync/channels'
+            ? [
+                {
+                  id: 7,
+                  name: 'Upstream',
+                  base_url: 'https://example.test',
+                  type: 1,
+                  status: 1,
+                },
+              ]
+            : {
+                entries: [],
+                empty_version: 'empty',
+                options: pricingOptions({}),
               },
-            ]
-          : {
-              entries: [],
-              empty_version: 'empty',
-              options: pricingOptions({}),
-            },
-    },
-  }))
+      },
+    }
+  })
   vi.spyOn(api, 'post').mockResolvedValue({
     data: {
       success: true,
@@ -1180,15 +1336,13 @@ it('disables both batch shortcuts when the configured exchange rate becomes inva
     })
   )
   await act(async () =>
-    useSystemConfigStore
-      .getState()
-      .setConfig({
-        currency: {
-          ...DEFAULT_CURRENCY_CONFIG,
-          quotaDisplayType: 'CNY',
-          usdExchangeRate: 0,
-        },
-      })
+    useSystemConfigStore.getState().setConfig({
+      currency: {
+        ...DEFAULT_CURRENCY_CONFIG,
+        quotaDisplayType: 'CNY',
+        usdExchangeRate: 0,
+      },
+    })
   )
   expect(
     screen.getByRole('button', { name: /Multiply by exchange rate/ })

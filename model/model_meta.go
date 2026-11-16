@@ -368,7 +368,7 @@ func DeleteModelMetadata(ids []int, removeFromChannels, removePricing bool) (Mod
 				}
 			}
 			return nil
-		})
+		}, nil)
 	} else {
 		err = metadataTransaction(deleteRecords)
 	}

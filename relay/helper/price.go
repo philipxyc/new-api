@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -69,6 +70,12 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		}
 	}
 	billingModelName := info.GetBillingModelName()
+	if pinned, ok := common.GetContextKeyType[jsplugin.PinnedPlugin](c, constant.ContextKeyProviderPlugin); ok &&
+		pinned.Plugin != nil && pinned.Plugin.Meta.CatalogRouting {
+		if !HasPriceOrRatioEntry(billingModelName) {
+			return hosttypes.PriceData{}, errors.New(i18n.T(c, i18n.MsgRelayModelPriceNotConfigured, map[string]any{"Model": billingModelName}))
+		}
+	}
 	modelPrice, usePrice := ratio_setting.GetModelPrice(billingModelName, false)
 
 	groupRatioInfo := HandleGroupRatio(c, info)

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitreasoning "github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -15,6 +16,14 @@ func newConvertRequestFailedError(c *gin.Context, info *relaycommon.RelayInfo, e
 	var pluginErr *types.NewAPIError
 	if errors.As(err, &pluginErr) && (pluginErr.GetErrorCode() == types.ErrorCodeRequestRejected || pluginErr.GetErrorCode() == types.ErrorCodeRequestPluginFailed) {
 		return pluginErr
+	}
+	// Catalog routing prepares the provider before conversion. Credential,
+	// transport and source-verification failures keep ordinary channel retries.
+	if pluginErr != nil && info != nil && info.ApiType == constant.APITypeProviderPlugin {
+		switch pluginErr.GetErrorCode() {
+		case types.ErrorCodeDoRequestFailed, types.ErrorCodeChannelInvalidKey, types.ErrorCodeBadResponseStatusCode, types.ErrorCodeModelPriceError:
+			return pluginErr
+		}
 	}
 	var loss *types.ConversionLossError
 	if errors.As(err, &loss) {
