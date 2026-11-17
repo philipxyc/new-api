@@ -66,6 +66,63 @@ source of truth. Named volumes must not be deleted with `down -v`.
 Set a public site announcement linking to this fork's corresponding source,
 while retaining the upstream New API and QuantumNous links and attribution.
 
+## Cloudflare-managed HTTPS
+
+The optional `cloudflare` Compose profile publishes the gateway through an
+outbound-only Cloudflare Tunnel. Cloudflare manages the public certificate;
+the edge-to-connector connection is encrypted, and HTTP stays on the private
+Docker network. Do not use Flexible SSL or disable certificate verification.
+
+Authorize `cloudflared` for the intended zone, create a dedicated named tunnel,
+and route only the desired hostname to it. Do not overwrite another DNS record
+or change zone-wide settings for this deployment. Store its tunnel-specific
+credentials at `/opt/new-api/secrets/cloudflared-tunnel.json`, owned by
+UID/GID `65532:65532` with mode `0400`; the enclosing secrets directory remains
+root-only. Never put the credentials in Git, command arguments, or logs.
+Remove the broader account certificate after provisioning; it is not needed
+to run this connector.
+
+For `napi.wizeats.com`, create root-owned `/opt/new-api/cloudflared.yml`
+with mode `0644` so the non-root connector can read its bind mount:
+
+```yaml
+tunnel: <dedicated-tunnel-uuid>
+credentials-file: /run/secrets/cloudflared_tunnel
+ingress:
+  - hostname: napi.wizeats.com
+    service: http://proxy:8080
+  - service: http_status:404
+```
+
+Set these non-secret values in `/opt/new-api/.env`:
+
+```dotenv
+COMPOSE_PROFILES=cloudflare
+PUBLIC_HOST=napi.wizeats.com
+HTTP_BIND=127.0.0.1
+SESSION_COOKIE_SECURE=true
+SESSION_COOKIE_TRUSTED_URL=https://napi.wizeats.com
+```
+
+Set the application's server address to `https://napi.wizeats.com`, then use
+the current immutable image from `active.env` with `docker compose up -d --wait`.
+The fixed connector address `172.30.80.4` is the only peer Caddy trusts for
+Cloudflare forwarding headers. Client IPs come from `CF-Connecting-IP`, not a
+client-supplied forwarding chain. Caddy redirects that hostname to HTTPS,
+disables response caching there, and preserves streaming. Health checks and
+the restricted deployment smoke probe continue to use local HTTP.
+
+Verify certificate validation, HTTP redirect, secure cookies, Origin rejection,
+real client IP handling, API/SSE responses, and closure of public origin access.
+Use HTTPS in clients; old IP-address browser cookies do not move to this host.
+The secure-cookie Origin guard accepts only HTTPS browser origins: an internal
+HTTP hop behind the tunnel does not make an HTTP Origin or Referer trustworthy.
+Cloudflare's CDN limits still apply to public tunnels, including its current
+125-second proxy read timeout on non-Enterprise zones. Very long silent or
+non-streaming requests can fail with 524; a tunnel does not remove this limit.
+Do not enable interactive browser challenges or cache authenticated API responses.
+Backups include the tunnel configuration, `.env`, and protected credentials.
+
 ## Native Copilot channel
 
 Create a channel using the bundled **GitHub Copilot** provider, leave its key
@@ -233,7 +290,10 @@ database; an image rollback cannot undo a database migration.
 ## Security verification references
 
 Apply OWASP ASVS 5.0.0 and the Authentication, Session Management and OAuth2
-Cheat Sheets. The existing provider login flow requires an authenticated
+Cheat Sheets. HTTPS origin enforcement follows the CSRF Cheat Sheet's
+server-configured target-origin guidance and ASVS 5.0.0 section 3.5.1;
+the hostname-scoped HSTS policy addresses section 3.4.1.
+The existing provider login flow requires an authenticated
 administrator session and provides
 session binding, single-use completion, expiry, server-side device state and
 poll throttling. Provider regression tests cover device pending/slow-down,

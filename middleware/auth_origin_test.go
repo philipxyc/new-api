@@ -73,17 +73,21 @@ func TestSessionCookieOriginGuardDevelopmentCompatibility(t *testing.T) {
 		common.SessionCookieSecure = previousSecure
 		common.SessionCookieTrustedURLs = previousTrustedURLs
 	})
-	common.SessionCookieTrustedURLs = nil
+	common.SessionCookieTrustedURLs = []string{"https://localhost:3000"}
 
 	tests := []struct {
 		name     string
 		secure   bool
 		origin   string
+		referer  string
 		expected int
 	}{
 		{name: "insecure mode allows mismatched development origins", origin: "http://localhost:3001", expected: http.StatusNoContent},
 		{name: "insecure mode allows missing origin", expected: http.StatusNoContent},
 		{name: "secure mode rejects mismatched development origins", secure: true, origin: "http://localhost:3001", expected: http.StatusForbidden},
+		{name: "secure proxy rejects same-host HTTP origin", secure: true, origin: "http://localhost:3000", expected: http.StatusForbidden},
+		{name: "secure proxy rejects same-host HTTP referer", secure: true, referer: "http://localhost:3000/profile", expected: http.StatusForbidden},
+		{name: "secure proxy accepts configured HTTPS origin", secure: true, origin: "https://localhost:3000", expected: http.StatusNoContent},
 	}
 
 	for _, test := range tests {
@@ -99,6 +103,9 @@ func TestSessionCookieOriginGuardDevelopmentCompatibility(t *testing.T) {
 			request.Host = "localhost:3000"
 			if test.origin != "" {
 				request.Header.Set("Origin", test.origin)
+			}
+			if test.referer != "" {
+				request.Header.Set("Referer", test.referer)
 			}
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, request)

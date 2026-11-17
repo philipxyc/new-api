@@ -14,7 +14,10 @@ docker compose -f compose.yml exec -T postgres pg_dump -U newapi -d newapi -Fc >
 test -s "$destination/database.dump"
 docker compose -f compose.yml exec -T postgres pg_restore --list < "$destination/database.dump" > /dev/null
 docker compose -f compose.yml run --rm --no-deps --entrypoint tar new-api -C /data -czf - . > "$destination/app-data.tar.gz"
-cp active.env schema.sha256 compose.yml Caddyfile "$destination/"
+cp active.env schema.sha256 compose.yml Caddyfile .env "$destination/"
+if [[ -f cloudflared.yml ]]; then
+  cp cloudflared.yml "$destination/"
+fi
 cp -a secrets "$destination/"
 touch "$destination/COMPLETE"
 echo "Backup complete: $destination"

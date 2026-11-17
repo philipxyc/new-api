@@ -14,6 +14,8 @@ services:
       - "${HTTP_BIND:-0.0.0.0}:80:8080"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    environment:
+      PUBLIC_HOST: "${PUBLIC_HOST:-localhost.invalid}"
     networks: [frontend]
     read_only: true
     tmpfs: [/config, /data]
@@ -44,8 +46,8 @@ services:
       GOMEMLIMIT: 512MiB
       PLUGIN_MEMORY_LIMIT_MB: "64"
       TRUSTED_PROXIES: 172.30.80.0/28
-      # Initial HTTP deployment, explicitly requested by the operator.
-      SESSION_COOKIE_SECURE: "false"
+      SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
+      SESSION_COOKIE_TRUSTED_URL: "${SESSION_COOKIE_TRUSTED_URL:-}"
       ERROR_LOG_ENABLED: "true"
       BATCH_UPDATE_ENABLED: "true"
     ports:
@@ -67,6 +69,36 @@ services:
       interval: 15s
       timeout: 5s
       retries: 8
+      start_period: 60s
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.11.0@sha256:b94b96edf2c9c4360f8879c8580cfaa99077f19c849ec595ca2f711b27d4f344
+    profiles: [cloudflare]
+    restart: unless-stopped
+    user: "65532:65532"
+    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "--metrics", "127.0.0.1:20241", "run"]
+    environment:
+      GOMEMLIMIT: 96MiB
+    volumes:
+      - ./cloudflared.yml:/etc/cloudflared/config.yml:ro
+    secrets: [cloudflared_tunnel]
+    networks:
+      frontend:
+        ipv4_address: 172.30.80.4
+      egress: {}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    logging: *logging
+    depends_on:
+      proxy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
       start_period: 60s
 
   postgres:
@@ -123,6 +155,8 @@ volumes:
   redis_data:
 
 secrets:
+  cloudflared_tunnel:
+    file: ./secrets/cloudflared-tunnel.json
   postgres_password:
     file: ./secrets/postgres_password
   redis_password:

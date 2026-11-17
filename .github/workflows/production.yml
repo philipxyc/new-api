@@ -8,6 +8,7 @@ on:
       - setting/billing_setting/**
       - controller/**
       - model/**
+      - middleware/**
       - relay/**
       - pkg/jsplugin/**
       - i18n/**
@@ -57,7 +58,7 @@ jobs:
           TEST_MYSQL_DSN: root:copilot-test-only@tcp(127.0.0.1:3306)/mysql?parseTime=true
           TEST_POSTGRES_DSN: postgres://postgres:copilot-test-only@127.0.0.1:5432/postgres?sslmode=disable
         run: |
-          go test ./plugins ./router ./relay/channel/providerplugin ./pkg/jsplugin -count=1
+          go test ./plugins ./router ./relay/channel/providerplugin ./pkg/jsplugin ./middleware -count=1
           go test ./service ./setting/billing_setting ./controller -run 'TestCopilot|TestGitHubCopilot|TestPricingSync|TestFetchModels|TestPluginLogin|TestGetTaskPluginOptions' -count=1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -77,6 +78,9 @@ jobs:
             koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
             /deployment/bootstrap.sh /deployment/deploy.sh /deployment/backup.sh
           docker compose -f deploy/compose.yml config --quiet
+          COMPOSE_PROFILES=cloudflare PUBLIC_HOST=napi.wizeats.com \
+            SESSION_COOKIE_SECURE=true SESSION_COOKIE_TRUSTED_URL=https://napi.wizeats.com \
+            docker compose -f deploy/compose.yml config --quiet
           docker run --rm -v "$PWD/deploy:/etc/caddy:ro" \
             caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0 \
             caddy validate --config /etc/caddy/Caddyfile

@@ -59,6 +59,9 @@ func requestBrowserOrigin(request *http.Request) (string, bool) {
 }
 
 func isAllowedSessionOrigin(request *http.Request, origin string) bool {
+	if !strings.HasPrefix(origin, "https://") {
+		return false
+	}
 	requestScheme := "http"
 	if request.TLS != nil {
 		requestScheme = "https"
